@@ -6,7 +6,7 @@ import re
 P=Path(__file__).resolve().parents[1]/'public'
 css=(P/'style.css').read_text()
 html=(P/'index.html').read_text()
-html=html.replace('<link rel="stylesheet" href="/style.css">', f'<style>{css}</style>')
+html=html.replace('<link rel="stylesheet" href="/style.css?v=15.0.5">', f'<style>{css}</style>')
 html=re.sub(r'<script[^>]*src="/app.js(?:\?v=[^"]+)?"[^>]*></script>','',html)
 app_js=re.sub(r'^import .*?;\n','',(P/'app.js').read_text(),count=3,flags=re.M)
 art=(P/'art.js').read_text().replace('export const ','const ').replace('const artistArt =','const _artistArt =').replace('const albumArt =','const _albumArt =')

@@ -7,7 +7,7 @@ P = Path(__file__).resolve().parents[1] / 'public'
 css = (P / 'style.css').read_text()
 raw_bb = (P / 'sidebar-bbcode.js').read_text()
 bb = re.sub(r'^export function ', 'function ', raw_bb, flags=re.M)
-admin = (P / 'admin.html').read_text().replace('<link rel="stylesheet" href="/style.css">', f'<style>{css}</style>')
+admin = (P / 'admin.html').read_text().replace('<link rel="stylesheet" href="/style.css?v=15.0.5">', f'<style>{css}</style>')
 admin = re.sub(r'<script[^>]*src="/admin.js(?:\?v=[^"]+)?"[^>]*></script>', '', admin)
 admin_js = re.sub(r'^import .*?;\n', '', (P / 'admin.js').read_text(), flags=re.M)
 

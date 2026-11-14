@@ -7,7 +7,7 @@ import json
 ROOT=Path(__file__).resolve().parents[1]/'public'
 html=(ROOT/'admin.html').read_text()
 html=re.sub(r'<script[^>]*src="/admin\.js"[^>]*></script>', '', html)
-html=html.replace('<link rel="stylesheet" href="/style.css">',f'<style>{(ROOT/"style.css").read_text()}</style>')
+html=html.replace('<link rel="stylesheet" href="/style.css?v=15.0.5">',f'<style>{(ROOT/"style.css").read_text()}</style>')
 admin_js=re.sub(r'^import .*?;\n','',(ROOT/'admin.js').read_text(),flags=re.M)
 
 bbcode_js=re.sub(r'^export function ', 'function ', (ROOT/'sidebar-bbcode.js').read_text(), flags=re.M)

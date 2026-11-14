@@ -38,20 +38,54 @@ window.addEventListener("hashchange", showPane);
 async function loadUsers(){
   const el = $("#usersList");
   if (!el || $("#panel").classList.contains("hidden")) return;
-  el.textContent = "Loading registered users…";
+  el.textContent = "Checking registered users and online links…";
   try {
-    const r = await fetch("/api/admin/users", { headers: {accept:"application/json"} });
+    const r = await fetch("/api/admin/users", {cache:"no-store"});
     if (!r.ok) throw Error(`HTTP ${r.status}`);
     const users = await r.json();
-    el.innerHTML = users.length ? `<table><thead><tr><th>Username</th><th>Hearted songs</th><th>Liked songs</th><th>Private playlists</th><th>Published playlists</th></tr></thead><tbody>${users.map(u=>`<tr><td><b>${esc(u.username)}</b></td><td>${Number(u.heart_songs)||0}</td><td>${Number(u.like_songs)||0}</td><td>${Number(u.private_playlists)||0}</td><td>${Number(u.public_playlists)||0}</td></tr>`).join("")}</tbody></table>` : `<p class="muted">No registered users yet.</p>`;
-  } catch { el.textContent = "Unable to load users."; }
+    el.innerHTML = users.length ? `<div class="table-scroll"><table><thead><tr><th>Username</th><th>Hearted songs</th><th>Liked songs</th><th>Private playlists</th><th>Published playlists</th><th>Provided links</th><th>Online links</th><th>Can publish</th><th>Actions</th></tr></thead><tbody>${users.map(u=>`<tr data-user-id="${esc(u.id)}"><td><b>${esc(u.username)}</b></td><td>${Number(u.heart_songs)||0}</td><td>${Number(u.like_songs)||0}</td><td>${Number(u.private_playlists)||0}</td><td>${Number(u.public_playlists)||0}</td><td>${Number(u.provided_links)||0}</td><td>${Number(u.online_links)||0}</td><td><label class="check"><input type="checkbox" data-user-publish="${esc(u.id)}" ${u.can_publish?'checked':''} aria-label="Allow ${esc(u.username)} to publish WASP links"> Allow</label></td><td><button class="btn danger" type="button" data-delete-user="${esc(u.id)}" data-delete-name="${esc(u.username)}">Delete user</button></td></tr>`).join("")}</tbody></table></div>` : `<p class="muted">No registered users yet.</p>`;
+  } catch(e) { el.textContent = "Unable to load users: "+e.message; }
 }
+$("#usersList").addEventListener("change",async e=>{
+  const t=e.target.closest("[data-user-publish]");if(!t)return;
+  t.disabled=true;
+  try {
+    const r=await post(`/api/admin/users/${encodeURIComponent(t.dataset.userPublish)}/publish`,{enabled:t.checked},"PUT");
+    const j=await r.json();if(!r.ok)throw Error(j.error||"Could not save permission");
+    $("#usersMsg").textContent="Publishing permission updated.";
+  }catch(err){t.checked=!t.checked;$("#usersMsg").textContent=err.message;}
+  t.disabled=false;
+});
+let pendingDeleteUser=null;
+$("#usersList").addEventListener("click",e=>{
+  const btn=e.target.closest("[data-delete-user]");if(!btn)return;
+  pendingDeleteUser=btn.dataset.deleteUser;
+  $("#deleteUserDescription").textContent=`Permanently delete ${btn.dataset.deleteName}, their account, playlists, attributed interactions and submitted links? Music files will remain.`;
+  $("#deleteUserForm").reset();$("#deleteUserMsg").textContent="";
+  $("#deleteUserDlg").showModal();
+});
+$("#deleteUserCancel").onclick=()=>$("#deleteUserDlg").close();
+$("#deleteUserForm").onsubmit=async e=>{
+  e.preventDefault();
+  if(!pendingDeleteUser)return;
+  if($("#deleteUserWord").value.trim()!=="delete"){$("#deleteUserMsg").textContent='Type exactly "delete".';return;}
+  const btn=$("#deleteUserForm button[type=submit]");btn.disabled=true;
+  try{
+    const r=await post(`/api/admin/users/${encodeURIComponent(pendingDeleteUser)}`,{
+      password:$("#deleteUserPassword").value,confirm:$("#deleteUserWord").value},"DELETE");
+    const j=await r.json();if(!r.ok)throw Error(j.error||"Unable to delete account");
+    $("#deleteUserDlg").close();$("#usersMsg").textContent="User and attributed data deleted.";pendingDeleteUser=null;await loadUsers();
+  }catch(err){$("#deleteUserMsg").textContent=err.message;}finally{btn.disabled=false;}
+};
 
 async function show() {
   const { admin } = await (await fetch("/api/me")).json();
   $("#login").classList.toggle("hidden", admin);
   $("#panel").classList.toggle("hidden", !admin);
   if (admin) {
+    const me=await(await fetch("/api/me",{cache:"no-store"})).json();
+    $("#adminAccountName").textContent=me.username||"admin";
+    $("#adminNewName").value=me.username||"admin";
     showPane(); refresh(); loadPlaylists(); loadRequests(); loadSite(); loadNetwork(); syncMode();
     fetch("/api/admin/version",{cache:"no-store"}).then(r=>r.json()).then(v=>{
       $("#adminBuild").textContent=`WASP v${v.version||"?"} · ${v.label||""}`;
@@ -713,6 +747,15 @@ $("#spPreviewBtn").addEventListener("click", () => {
 });
 $("#spSave").addEventListener("click", () => saveSettings({ ad_enabled: $("#spOn").checked, ad_html: $("#spCode").value, ad_height: $("#spH").value }, "#spMsg"));
 
+// Administrator role remains bound to the server-side session, never to a username.
+$("#adminNameForm").addEventListener("submit",async e=>{
+  e.preventDefault();const f=e.currentTarget;
+  const r=await post("/api/admin/username",{username:$("#adminNewName").value,password:$("#adminNamePassword").value},"PUT");
+  const j=await r.json().catch(()=>({}));
+  $("#adminNamePassword").value="";
+  if(r.ok){$("#adminAccountName").textContent=j.username;flashMsg("#acctMsg","Administrator username updated.");}
+  else flashMsg("#acctMsg",j.error||"Could not change username.",true);
+});
 // ---------- account settings: the password window only opens on click ----------
 const pwDlg = $("#pwDlg");
 $("#pwOpen").addEventListener("click", () => { $("#pwForm").reset(); $("#pwMsg").textContent = ""; pwDlg.showModal(); $("#cur").focus(); });

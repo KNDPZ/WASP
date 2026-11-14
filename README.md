@@ -17,6 +17,10 @@ You can deploy WASP locally for development, on **Cloudflare Workers**, or on yo
 > Once signed in, open **Admin → Account settings** to change it.
 
 
+### v15.0.5: Member account management and community publishing
+
+Administrators can change their login username in **Admin → Account settings**, while members can change theirs under **Account settings → Account**. Members also have a **Publish** tab for contributing their own public HTTPS WASP links, but an administrator must first enable publishing for each account under **Admin → Users**. The admin Users screen shows submitted and online link counts without displaying user-submitted addresses and provides password-confirmed account deletion. Submitted links are peers only, never automatically the local/primary library. Existing administrator-managed private Bridge peers remain separate. See [`docs/V15-0-5-ACCOUNT-COMMUNITY-PUBLISH.md`](docs/V15-0-5-ACCOUNT-COMMUNITY-PUBLISH.md) for safety/privacy limitations, destructive-action precautions and staging tests.
+
 ### v15.0.4: Collapsible icon sidebar
 
 The public WASP sidebar starts fully expanded. Use the new arrow control at the top of the sidebar navigation to tuck it into a compact icon rail, giving more horizontal room to playlists, artists and songs. The compact rail uses the supplied colored/monochrome nav icons in rounded-square frames; hover over an icon to see its tab name. All links remain accessible and clickable, and sidebar BBCode credits are simply hidden until expanded. The choice is remembered in this browser. On phones, the existing horizontal text navigation remains. No data migration is required. See [`docs/V15-0-4-COLLAPSIBLE-SIDEBAR.md`](docs/V15-0-4-COLLAPSIBLE-SIDEBAR.md).

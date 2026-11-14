@@ -6,7 +6,7 @@
 <meta name="robots" content="noindex">
 <title>Admin · WASP</title>
 <link rel="icon" id="favicon" href="/wasp-icon.png">
-<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/style.css?v=15.0.5">
 </head>
 <body style="--ph:0px;padding-bottom:0">
 
@@ -219,7 +219,13 @@
     <section class="pane hidden" id="s-account">
       <h1>Account settings</h1>
       <div class="card" style="max-width:520px">
-        <p class="muted" style="margin-top:0">Signed in as <b>admin</b></p>
+        <p class="muted" style="margin-top:0">Signed in as <b id="adminAccountName">admin</b></p>
+        <form id="adminNameForm" class="form account-name-form">
+          <label>Change administrator username<input id="adminNewName" name="username" minlength="3" maxlength="32" pattern="[A-Za-z0-9_-]{3,32}" required autocomplete="off"></label>
+          <label>Current admin password<input id="adminNamePassword" type="password" name="password" autocomplete="current-password" required></label>
+          <button class="btn" type="submit">Save username</button>
+        </form>
+        <p class="muted">Changing the username does not grant administrator access to other accounts.</p>
         <button class="linkrow" id="pwOpen" type="button" aria-haspopup="dialog">Change password <span aria-hidden="true">›</span></button>
         <p class="msg" id="acctMsg" role="status"></p>
       </div>
@@ -312,12 +318,24 @@
       <h1>Users</h1>
       <div class="card users-summary">
         <h2>Registered accounts</h2>
-        <p class="muted">Song reactions are counted when a signed-in user reacts. Earlier anonymous hearts and likes cannot be attributed to accounts.</p>
+        <p class="muted">Grant publishing permission per account (off by default). Submitted link addresses are not shown here—only counts and how many are online. Existing anonymous activity cannot always be attributed retroactively.</p>
+        <p id="usersMsg" class="msg" role="status"></p>
         <div id="usersList" aria-live="polite">Open this page to load users.</div>
       </div>
     </section>
   </div>
 </div>
+
+<dialog id="deleteUserDlg" aria-labelledby="deleteUserTitle">
+  <form id="deleteUserForm" class="form" style="flex-direction:column;align-items:stretch">
+    <h2 id="deleteUserTitle">Delete user account</h2>
+    <p id="deleteUserDescription" class="muted">This permanently deletes the account, playlists, attributed reactions and submitted peers. Shared MP3 files remain.</p>
+    <label>Administrator password<input type="password" id="deleteUserPassword" autocomplete="current-password" required></label>
+    <label>Type <b>delete</b> to confirm<input type="text" id="deleteUserWord" autocomplete="off" required></label>
+    <p id="deleteUserMsg" class="msg err" role="alert"></p>
+    <div class="form" style="justify-content:flex-end"><button class="btn ghost" type="button" id="deleteUserCancel">Cancel</button><button class="btn danger" type="submit">Delete user</button></div>
+  </form>
+</dialog>
 
 <dialog id="pwDlg" aria-labelledby="pwT">
   <form id="pwForm" class="form" style="flex-direction:column;align-items:stretch">
@@ -345,6 +363,6 @@
     <div class="form" style="justify-content:flex-end"><button class="btn ghost" type="button" id="cCancel">Cancel</button><button class="btn danger solid" id="cGo" type="submit" disabled>Delete everything</button></div>
   </form>
 </dialog>
-<script type="module" src="/admin.js?v=15.0.4"></script>
+<script type="module" src="/admin.js?v=15.0.5"></script>
 </body>
 </html>

@@ -4,8 +4,8 @@ import {extractEmbeddedArt, MAX_ID3_ART_READ, MAX_EMBEDDED_IMAGE} from "./embedd
 // Storage: R2 (mp3 files + artwork, binding MUSIC) and D1 (library, playlists, reactions, admin hash, sessions, binding DB).
 
 // Salted PBKDF2 hash of the first-time admin password. Change it from the admin page after first login.
-const BUILD_VERSION = "15.0.4";
-const BUILD_LABEL = "Federated Library · Embedded Artwork Fallback";
+const BUILD_VERSION = "15.0.5";
+const BUILD_LABEL = "Federated Library · Account & Community Publishing";
 const DEFAULT_SALT = "9756e918a7545f9eec461ee48491018a";
 const DEFAULT_HASH = "539db4ea2054366abc97375b551b16c115622e1a89b8f9cf75cea28345c6ba26";
 
@@ -48,7 +48,7 @@ const PUBLIC_CACHE_TTLS = Object.freeze({
   "/api/track-reaction-counts": 5,
   "/api/recent-listens": 10,
 });
-const CACHE_REV = "wasp-v15-0";
+const CACHE_REV = "wasp-v15-0-5";
 const publicRevision = url => /^[a-f0-9-]{1,40}$/i.test(url.searchParams.get("v") || "") ? url.searchParams.get("v") : "";
 const cacheFor = (req, url) => req.method === "GET" && (!url.search || (url.searchParams.size===1 && !!publicRevision(url))) && PUBLIC_CACHE_TTLS[url.pathname]
   ? (typeof caches !== "undefined" && caches.default ? caches.default : null) : null;
@@ -113,6 +113,117 @@ function withCors(res, share) {
   return new Response(res.body, { status: res.status, statusText: res.statusText, headers: h });
 }
 
+
+const COMMUNITY_SCHEMA = [
+  "CREATE TABLE IF NOT EXISTS user_peer_permissions (user_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0)",
+  "CREATE TABLE IF NOT EXISTS user_published_peers (id TEXT PRIMARY KEY,user_id TEXT NOT NULL,url TEXT NOT NULL,name TEXT NOT NULL DEFAULT '',track_count INTEGER NOT NULL DEFAULT 0,last_ok INTEGER,last_error TEXT,last_checked INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL,UNIQUE(user_id,url))",
+  "CREATE INDEX IF NOT EXISTS idx_user_peers_owner ON user_published_peers(user_id)",
+  "CREATE TABLE IF NOT EXISTS user_voter_tokens (user_id TEXT NOT NULL,voter TEXT NOT NULL,PRIMARY KEY(user_id,voter))",
+];
+async function upgradeCommunitySchema(DB) {
+  for (const sql of COMMUNITY_SCHEMA) await DB.prepare(sql).run();
+  await DB.prepare("INSERT INTO settings(key,value) VALUES('wasp_schema_version','15.2') ON CONFLICT(key) DO UPDATE SET value='15.2'").run();
+}
+// User-contributed URLs must not reach Tailscale, localhost, cloud metadata, or
+// Docker's internal services. Administrator-managed peers retain their own policy.
+function publicWaspOrigin(input) {
+  if(typeof input!=='string'||input.length>250)throw Error('Use a publicly reachable HTTPS WASP hostname.');
+  let u;try{u=new URL(input.trim());}catch{throw Error('Enter a full HTTPS link.');}
+  if(u.protocol!=='https:'||u.username||u.password||u.port||u.search||u.hash||
+     (u.pathname!=='/'&&u.pathname!==''))throw Error('Use only the HTTPS homepage URL (without a path, port, or credentials).');
+  const h=u.hostname.toLowerCase().replace(/\.$/,'');
+  if(!h.includes('.')||h.length>253||!h.split('.').every(p=>/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(p))||
+     /(?:^|\.)(?:localhost|local|internal|test|invalid|example|onion|home|lan)$/.test(h)||
+     /^\d+\.\d+\.\d+\.\d+$/.test(h)||h.includes(':')||h.endsWith('.arpa'))
+    throw Error('Only public DNS hostnames are allowed for user-published peers.');
+  return 'https://'+h;
+}
+function publicIPAddress(address) {
+  if(/^\d+\.\d+\.\d+\.\d+$/.test(address)) {
+    const n=address.split('.').map(Number);
+    if(n.some(v=>v<0||v>255))return false;
+    const [a,b,c]=n;
+    return a>=1&&a<224&&a!==10&&a!==127&&a!==0&&
+      !(a===100&&b>=64&&b<=127)&&!(a===169&&b===254)&&
+      !(a===172&&b>=16&&b<=31)&&!(a===192&&(b===0||b===168||b===88&&c===99||b===0&&c===2))&&
+      !(a===198&&(b===18||b===19||b===51&&c===100))&&
+      !(a===203&&b===0&&c===113);
+  }
+  // Global-unicast IPv6 only; exclude documentation and special-use blocks.
+  if(address.includes(':'))return /^[23][0-9a-f]{3}:/i.test(address) && !/^2001:db8:/i.test(address);
+  return false;
+}
+async function publicPeerDNS(hostname) {
+  // Check DNS A and AAAA answers before making a user-requested server-side
+  // request. A host that resolves to private, loopback or link-local space is
+  // rejected. The network administrator should additionally restrict egress;
+  // DNS can change between this check and the TLS connection.
+  let current=hostname;
+  for(let depth=0;depth<4;depth++) {
+    const answers=await Promise.all(['A','AAAA'].map(async type=>{
+      const q=new URL('https://cloudflare-dns.com/dns-query');
+      q.searchParams.set('name',current);q.searchParams.set('type',type);
+      const r=await fetch(q.href,{redirect:'manual',headers:{accept:'application/dns-json'},signal:AbortSignal.timeout(4000)});
+      if(!r.ok)return null;
+      const v=await r.json().catch(()=>null);
+      return v&&v.Status===0&&Array.isArray(v.Answer||[]) ? v.Answer||[] : null;
+    }));
+    if(answers.some(a=>!a))return false;
+    const rows=answers.flat(),addresses=rows.filter(r=>r.type===1||r.type===28).map(r=>String(r.data||''));
+    if(addresses.length)return addresses.every(publicIPAddress);
+    const cname=rows.find(r=>r.type===5)?.data;
+    if(!cname)return false;
+    try {current=new URL(publicWaspOrigin('https://'+String(cname).replace(/\.$/,''))).hostname;}
+    catch{return false;}
+  }
+  return false;
+}
+async function probeCommunityPeer(origin) {
+  try {
+    if(!(await publicPeerDNS(new URL(origin).hostname)))return {online:false,error:'Peer hostname is not publicly reachable'};
+    const r=await fetch(origin+'/api/peer',{redirect:'manual',signal:AbortSignal.timeout(6000),
+      headers:{accept:'application/json'}});
+    if(!r.ok||r.status>=300)return {online:false,error:'Peer unavailable'};
+    const size=Number(r.headers.get('content-length')||0);
+    if(size>8192)return {online:false,error:'Invalid peer response'};
+    const reader=r.body?.getReader(),parts=[];let total=0;
+    if(!reader)return {online:false,error:'Empty peer response'};
+    while(true){const {done,value}=await reader.read();if(done)break;
+      total+=value.byteLength;if(total>8192){await reader.cancel().catch(()=>{});return {online:false,error:'Peer response too large'};}
+      parts.push(value);
+    }
+    const bytes=new Uint8Array(total);let offset=0;
+    for(const part of parts){bytes.set(part,offset);offset+=part.byteLength;}
+    let j;try{j=JSON.parse(new TextDecoder().decode(bytes));}catch{return {online:false,error:'Invalid peer response'};}
+    if(j?.ok!==true||!Number.isFinite(Number(j.tracks))||Number(j.tracks)<0||Number(j.tracks)>10000000)
+      return {online:false,error:'Not a sharing WASP server'};
+    return {online:true,name:clean(j.name||j.title||'WASP',80),tracks:Math.floor(Number(j.tracks))};
+  }catch{return {online:false,error:'Peer unreachable'};}
+}
+async function refreshCommunityHealth(DB,limit=60) {
+  const entries=(await DB.prepare(`SELECT l.id,l.url FROM user_published_peers l
+    JOIN user_peer_permissions p ON p.user_id=l.user_id AND p.enabled=1
+    ORDER BY l.last_checked ASC LIMIT ?`).bind(limit).all()).results;
+  // Limit concurrent network fetches to avoid overwhelming the Worker and D1.
+  for(let i=0;i<entries.length;i+=5) await Promise.all(entries.slice(i,i+5).map(async entry=>{
+    const status=await probeCommunityPeer(entry.url);
+    await DB.prepare(`UPDATE user_published_peers SET name=CASE WHEN ?!='' THEN ? ELSE name END,
+      track_count=CASE WHEN ? THEN ? ELSE track_count END,
+      last_ok=CASE WHEN ? THEN ? ELSE last_ok END,last_error=?,last_checked=? WHERE id=?`)
+      .bind(status.name||'',status.name||'',status.online?1:0,status.tracks||0,status.online?1:0,Date.now(),
+        status.online?null:status.error,Date.now(),entry.id).run();
+  }));
+}
+async function knownPeer(DB,origin) {
+  return !!((await DB.prepare('SELECT 1 FROM peers WHERE url=?').bind(origin).first()) ||
+    (await DB.prepare(`SELECT 1 FROM user_published_peers l JOIN user_peer_permissions p
+      ON p.user_id=l.user_id AND p.enabled=1 WHERE l.url=? AND l.last_error IS NULL AND l.last_ok IS NOT NULL LIMIT 1`).bind(origin).first()));
+}
+async function recordSignedInVoter(DB,info,voter) {
+  if(info?.role==='user'&&info.user_id)
+    await DB.prepare('INSERT OR IGNORE INTO user_voter_tokens(user_id,voter) VALUES(?,?)').bind(info.user_id,voter).run();
+}
+
 let ready;
 function init(env) {
   return (ready ??= (async () => {
@@ -141,10 +252,11 @@ function init(env) {
       // The older schema also needs the created_at lookup index.
       await q("CREATE INDEX IF NOT EXISTS idx_tracks_created ON tracks(created_at DESC)").run();
       // Advance only after every required DDL operation succeeds.
-      await q("UPDATE settings SET value='15.1' WHERE key='wasp_schema_version'").run();
+      await upgradeCommunitySchema(env.DB);
       return;
     }
-    if(marker?.value === "15.1")return;
+    if(marker?.value === "15.2")return;
+    if(marker?.value === "15.1") {await upgradeCommunitySchema(env.DB);return;}
     // Multiple Cloudflare isolates may start together across data centers.
     // A D1-backed lease prevents simultaneous backfills and repeated index
     // builds from multiplying the free-tier writes on initial deployment.
@@ -159,7 +271,7 @@ function init(env) {
         for(let attempt=0;attempt<20;attempt++) {
           await new Promise(resolve=>setTimeout(resolve,500));
           const marker=await q("SELECT value FROM settings WHERE key = 'wasp_schema_version'").first();
-          if(marker?.value === "15.1") return;
+          if(marker?.value === "15.2") return;
         }
         throw new Error("A WASP database migration is still running. Please retry shortly.");
       }
@@ -168,7 +280,7 @@ function init(env) {
     // Another isolate may have completed the migration after our first check
     // but before this isolate acquired the released lease.
     const afterLease=await q("SELECT value FROM settings WHERE key = 'wasp_schema_version'").first();
-    if(afterLease?.value === "15.1") return;
+    if(afterLease?.value === "15.2") return;
     // Run each statement on its own. D1 batch() is atomic: one failure rolls the whole
     // batch back, so a hiccup on a new table/index during an upgrade used to take the
     // entire site down. Individual try/catch keeps the site up even if one step fails.
@@ -263,7 +375,7 @@ function init(env) {
     if(afterLease?.value !== "14") await rebuildArtistMap(env.DB);
     // Only set the marker after all essential work succeeds; partial migrations
     // safely retry on the next cold start rather than hiding a missing index.
-    await q("INSERT INTO settings(key,value) VALUES('wasp_schema_version','15.1') ON CONFLICT(key) DO UPDATE SET value=excluded.value").run();
+    await upgradeCommunitySchema(env.DB);
     } finally {
       if(claimed) await q("DELETE FROM settings WHERE key='wasp_v14_migration_lease' AND value=?").bind(lease).run().catch(()=>{});
     }
@@ -1225,6 +1337,7 @@ async function recordListen(DB,{track_id,origin='',remote_id='',title='',artist=
 async function runCronJob(env,kind){
   if(kind==="hash")return {queued:!!env.SCANNER_SECRET,local_only:true};
   if(kind==="peers"){
+    await refreshCommunityHealth(env.DB,8);
     const rows=(await env.DB.prepare("SELECT id,url,track_count FROM peers ORDER BY added_at LIMIT 60").all()).results;
     let updated=0;
     const config=await getCronConfig(env.DB);
@@ -1288,7 +1401,7 @@ async function api(req, env, url, ctx) {
   if(path==="/api/play-peer" && m==="POST") {
     const b=await req.json().catch(()=>({}));
     const origin=clean(b.origin,300).replace(/\/$/,""),remote=clean(b.remote_id,100);
-    if(!origin||!/^[\w-]{1,100}$/.test(remote) || !(await DB.prepare("SELECT 1 FROM peers WHERE url=?").bind(origin).first()))
+    if(!origin||!/^[\w-]{1,100}$/.test(remote) || !(await knownPeer(DB,origin)))
       return json({error:"Unknown peer track"},400);
     let canonical=origin;
     try {
@@ -1325,9 +1438,17 @@ async function api(req, env, url, ctx) {
   // List of peer base URLs this instance has added (so the front-end can pull their tracks).
   if (path === "/api/network/peers" && m === "GET") {
     const rows = (await DB.prepare("SELECT id, url, name, track_count, last_ok, last_error FROM peers ORDER BY added_at").all()).results;
+    const published=(await DB.prepare(`SELECT l.url,l.name,l.track_count,l.last_ok FROM user_published_peers l
+      JOIN user_peer_permissions p ON p.user_id=l.user_id AND p.enabled=1
+      WHERE l.last_error IS NULL AND l.last_ok IS NOT NULL ORDER BY l.created_at`).all()).results;
+    const known=new Set(rows.map(r=>r.url));
+    for(const p of published)if(!known.has(p.url)){
+      rows.push({id:'community-'+await sha256(p.url),url:p.url,name:p.name||'WASP',track_count:p.track_count,last_ok:p.last_ok,last_error:null,community:true});
+      known.add(p.url);
+    }
     const primary=(await DB.prepare("SELECT value FROM settings WHERE key='primary_peer_id'").first())?.value||"";
     return json(rows.map((p) => ({
-      id: p.id, url: p.url, name: p.name || p.url, is_primary:p.id===primary,
+      id: p.id, url: p.url, name: p.name || p.url, is_primary:!p.community && p.id===primary, community:!!p.community,
       track_count: p.track_count || 0,
       online: !!(p.last_ok && !p.last_error),
       last_ok: p.last_ok || null,
@@ -1446,7 +1567,7 @@ async function api(req, env, url, ctx) {
     if (!auth || auth.role !== "user") return json({error:"Sign in required."},401);
     const b = await req.json().catch(() => ({}));
     const origin = clean(b.origin, 250).replace(/\/$/, ""), remoteId = clean(b.id, 100);
-    const peer = await DB.prepare("SELECT url FROM peers WHERE url = ?").bind(origin).first();
+    const peer = await knownPeer(DB,origin);
     if (!peer || !/^[\w-]{1,100}$/.test(remoteId)) return json({error:"Unknown peer or track."},400);
     const ref = "peer:" + await sha256(origin + "\n" + remoteId);
     const cover = clean(b.cover_url,500);
@@ -1471,6 +1592,11 @@ async function api(req, env, url, ctx) {
     const b=await req.json().catch(()=>({})), id=clean(b.id,220);
     if(!id)return json({error:"Playlist required."},400);
     const visitor=getCookie(req,"riffvault_heart") || crypto.randomUUID();
+    const signedIn=await sessionInfo(req,env);
+    if(signedIn?.role==='user'&&signedIn.user_id) {
+      await recordSignedInVoter(DB,signedIn,visitor);
+      await recordSignedInVoter(DB,signedIn,'legacy:'+visitor);
+    }
     await DB.batch([
       DB.prepare("INSERT OR IGNORE INTO playlist_hearts (playlist_id,voter) VALUES (?,?)").bind(id,visitor),
       DB.prepare("INSERT OR IGNORE INTO entity_reactions(kind,entity,voter,reaction) VALUES ('playlist',?,?,'heart')").bind(id,'legacy:'+visitor)
@@ -1500,7 +1626,7 @@ async function api(req, env, url, ctx) {
     if (origin) {
       try { const u=new URL(origin);if(!["http:","https:"].includes(u.protocol)||u.href.replace(/\/$/,"")!==origin) return json({error:"Invalid peer."},400); }
       catch { return json({error:"Invalid peer."},400); }
-      trustedRemote = !!(await DB.prepare("SELECT 1 FROM peers WHERE url = ?").bind(origin).first());
+      trustedRemote = await knownPeer(DB,origin);
     }
     if (type === "artist") {
       const local = await libraryHasArtist(DB, key);
@@ -1536,6 +1662,7 @@ async function api(req, env, url, ctx) {
       }
     }
     const voter = await sha256(vid), stmts = [];
+    await recordSignedInVoter(DB,await sessionInfo(req,env),voter);
     if (b.on === true) {
       stmts.push(DB.prepare("INSERT OR IGNORE INTO entity_reactions (kind, entity, voter, reaction) VALUES (?,?,?,?)").bind(type, key, voter, kind));
       const other = kind === "like" ? "dislike" : kind === "dislike" ? "like" : null;
@@ -1620,6 +1747,7 @@ async function api(req, env, url, ctx) {
     if (await inLibrary(DB, item)) return json({ error: "That's already in the library.", code: "in_library" }, 409);
     try {
       if (item.meta) item.meta.matched = matchPlaylist(await libraryRows(DB), item.meta.tracks).matched.length;
+      await recordSignedInVoter(DB,await sessionInfo(req,env),voter);
       await DB.prepare("INSERT INTO requests (id, kind, title, artist, album, image, url, dedupe, voter, ip, created_at, meta) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
         .bind(crypto.randomUUID(), item.kind, item.title, item.artist || "", item.album || "", item.image, item.url || null, item.dedupe, voter, ipH, Date.now(), item.meta ? JSON.stringify(item.meta) : null).run();
     } catch { return json({ error: "That's already in the queue.", code: "in_queue" }, 409); }
@@ -1638,7 +1766,7 @@ async function api(req, env, url, ctx) {
     let id;
     if (origin || remoteId) {
       if (!origin || !/^[\w-]{1,100}$/.test(remoteId)) return json({error:"Invalid peer song."},400);
-      const known=await DB.prepare("SELECT 1 FROM peers WHERE url = ?").bind(origin).first();
+      const known=await knownPeer(DB,origin);
       if (!known) return json({error:"Unknown peer."},404);
       id="peer-"+await sha256(origin+"\n"+remoteId);
     } else {
@@ -1681,7 +1809,7 @@ async function api(req, env, url, ctx) {
     const vid = req.headers.get("X-Visitor") || "";
     if (!/^[\w-]{8,64}$/.test(vid) || !["heart","like","dislike"].includes(b.kind) ||
         !/^[\w-]{1,100}$/.test(remoteId) || !origin) return json({error:"Invalid reaction."},400);
-    const peer = await DB.prepare("SELECT url FROM peers WHERE url = ?").bind(origin).first();
+    const peer = await knownPeer(DB,origin);
     if (!peer) return json({error:"Unknown peer."},404);
     const id = "peer-" + await sha256(origin + "\n" + remoteId);
     const voter = await sha256(vid);
@@ -1712,6 +1840,7 @@ async function api(req, env, url, ctx) {
       statements.push(DB.prepare("DELETE FROM reactions WHERE track_id = ? AND voter = ? AND kind = ?").bind(id,voter,kind));
     }
     const signedIn = await sessionInfo(req,env);
+    await recordSignedInVoter(DB,signedIn,voter);
     if (signedIn?.role === "user" && signedIn.user_id) {
       if (b.on === true) {
         statements.push(DB.prepare("INSERT OR IGNORE INTO user_song_reactions(user_id,track_id,kind) VALUES (?,?,?)").bind(signedIn.user_id,id,kind));
@@ -1747,6 +1876,7 @@ async function api(req, env, url, ctx) {
       stmts.push(DB.prepare("DELETE FROM reactions WHERE track_id = ? AND voter = ? AND kind = ?").bind(id, voter, kind));
     }
     const signedIn = await sessionInfo(req, env);
+    await recordSignedInVoter(DB,signedIn,voter);
     if (signedIn?.role === "user" && signedIn.user_id) {
       if (b.on) {
         stmts.push(DB.prepare("INSERT OR IGNORE INTO user_song_reactions (user_id,track_id,kind) VALUES (?,?,?)").bind(signedIn.user_id,id,kind));
@@ -1821,6 +1951,42 @@ async function api(req, env, url, ctx) {
     // Authenticated user operations; admin credentials are handled separately.
 
     if (!auth || auth.role !== "user") return json({ error: "User login required." }, 401);
+    if(path==="/api/user/username" && m==="PUT") {
+      const b=await req.json().catch(()=>({})), username=clean(b.username,32);
+      if(!/^[a-zA-Z0-9_-]{3,32}$/.test(username))return json({error:'Username must be 3–32 characters: letters, numbers, _ or -.'},400);
+      const adminName=(await DB.prepare("SELECT value FROM settings WHERE key='admin_username'").first())?.value||'admin';
+      if(['admin',adminName.toLowerCase()].includes(username.toLowerCase()))return json({error:'Reserved administrator username.'},409);
+      const self=await DB.prepare('SELECT salt,hash FROM user_accounts WHERE id=?').bind(auth.user_id).first();
+      if(!self||!safeEq(await pbkdf2(String(b.password||''),self.salt),self.hash))return json({error:'Current password is incorrect.'},403);
+      try {await DB.prepare('UPDATE user_accounts SET username=? WHERE id=?').bind(username,auth.user_id).run();}
+      catch {return json({error:'Username is already in use.'},409);}
+      await touchCatalogue(DB);return json({ok:true,username});
+    }
+    if(path==="/api/user/publish" && m==="GET") {
+      const allowed=!!(await DB.prepare('SELECT enabled FROM user_peer_permissions WHERE user_id=?').bind(auth.user_id).first())?.enabled;
+      const links=(await DB.prepare('SELECT id,url,name,track_count,last_ok,last_error,last_checked FROM user_published_peers WHERE user_id=? ORDER BY created_at DESC').bind(auth.user_id).all()).results;
+      return json({enabled:allowed,links:links.map(l=>({...l,online:!!l.last_ok&&!l.last_error}))});
+    }
+    if(path==="/api/user/publish" && m==="POST") {
+      const allowed=(await DB.prepare('SELECT enabled FROM user_peer_permissions WHERE user_id=?').bind(auth.user_id).first())?.enabled;
+      if(!allowed)return json({error:'An administrator must enable publishing for your account.'},403);
+      const count=(await DB.prepare('SELECT COUNT(*) AS n FROM user_published_peers WHERE user_id=?').bind(auth.user_id).first()).n;
+      if(count>=8)return json({error:'Maximum 8 links per account.'},429);
+      const b=await req.json().catch(()=>({}));let origin;
+      try{origin=publicWaspOrigin(b.url);}catch(e){return json({error:e.message},400);}
+      if(origin===new URL(req.url).origin)return json({error:'You cannot publish this server as its own peer.'},400);
+      const status=await probeCommunityPeer(origin);
+      if(!status.online)return json({error:'The link is not a reachable, sharing WASP server.'},422);
+      const id=crypto.randomUUID();
+      try{await DB.prepare(`INSERT INTO user_published_peers(id,user_id,url,name,track_count,last_ok,last_error,last_checked,created_at)
+        VALUES(?,?,?,?,?,?,NULL,?,?)`).bind(id,auth.user_id,origin,status.name,status.tracks,Date.now(),Date.now(),Date.now()).run();}
+      catch{return json({error:'This link has already been added by your account.'},409);}
+      await touchCatalogue(DB);return json({ok:true,id,url:origin,name:status.name,online:true,track_count:status.tracks},201);
+    }
+    if((x=path.match(/^\/api\/user\/publish\/([\w-]+)$/))&&m==='DELETE') {
+      await DB.prepare('DELETE FROM user_published_peers WHERE id=? AND user_id=?').bind(x[1],auth.user_id).run();
+      await touchCatalogue(DB);return json({ok:true});
+    }
     if(path==="/api/user/password" && m==="POST"){
       const b=await req.json().catch(()=>({}));const password=String(b.password||""), confirm=String(b.confirm||"");
       if(password.length<8)return json({error:"New password must be at least 8 characters."},400);
@@ -1950,17 +2116,64 @@ async function api(req, env, url, ctx) {
   }
 
 
-  // Read-only administrative overview. Anonymous historical reactions cannot be
-  // attributed to accounts retroactively, so only authenticated actions are counted.
+  // Admin users may count healthy community peers, but never receive their URLs.
   if (path === "/api/admin/users" && m === "GET") {
+    await refreshCommunityHealth(DB,8);
     const { results } = await DB.prepare(`
       SELECT u.id, u.username, u.created_at,
+        COALESCE((SELECT enabled FROM user_peer_permissions x WHERE x.user_id=u.id),0) AS can_publish,
+        (SELECT COUNT(*) FROM user_published_peers l WHERE l.user_id=u.id) AS provided_links,
+        (SELECT COUNT(*) FROM user_published_peers l WHERE l.user_id=u.id AND l.last_ok IS NOT NULL AND l.last_error IS NULL AND EXISTS (SELECT 1 FROM user_peer_permissions p WHERE p.user_id=u.id AND p.enabled=1)) AS online_links,
         (SELECT COUNT(*) FROM user_song_reactions r WHERE r.user_id=u.id AND r.kind='heart') AS heart_songs,
         (SELECT COUNT(*) FROM user_song_reactions r WHERE r.user_id=u.id AND r.kind='like') AS like_songs,
         (SELECT COUNT(*) FROM user_playlists p WHERE p.user_id=u.id AND p.is_public=0) AS private_playlists,
         (SELECT COUNT(*) FROM user_playlists p WHERE p.user_id=u.id AND p.is_public=1) AS public_playlists
       FROM user_accounts u ORDER BY u.created_at DESC, u.username COLLATE NOCASE`).all();
     return json(results);
+  }
+  if((x=path.match(/^\/api\/admin\/users\/([\w-]+)\/publish$/))&&m==='PUT') {
+    const user=await DB.prepare('SELECT id FROM user_accounts WHERE id=?').bind(x[1]).first();
+    if(!user)return json({error:'User not found.'},404);
+    const b=await req.json().catch(()=>({}));
+    if(typeof b.enabled!=='boolean')return json({error:'Invalid permission.'},400);
+    await DB.prepare(`INSERT INTO user_peer_permissions(user_id,enabled) VALUES(?,?)
+      ON CONFLICT(user_id) DO UPDATE SET enabled=excluded.enabled`).bind(user.id,b.enabled?1:0).run();
+    await touchCatalogue(DB);return json({ok:true,enabled:b.enabled});
+  }
+  if((x=path.match(/^\/api\/admin\/users\/([\w-]+)$/))&&m==='DELETE') {
+    const b=await req.json().catch(()=>({}));
+    if(String(b.confirm||'').trim()!=='delete')return json({error:'Type delete to confirm.'},400);
+    const row=await DB.prepare("SELECT salt,hash FROM admin WHERE id='admin'").first();
+    if(!row||!safeEq(await pbkdf2(String(b.password||''),row.salt),row.hash))return json({error:'Administrator password is incorrect.'},403);
+    const user=await DB.prepare('SELECT id FROM user_accounts WHERE id=?').bind(x[1]).first();
+    if(!user)return json({error:'User not found.'},404);
+    const images=(await DB.prepare('SELECT id FROM user_playlists WHERE user_id=?').bind(user.id).all()).results;
+    // Atomic D1 removal of user-owned data. Music files and other users' playlists are retained.
+    await DB.batch([
+      DB.prepare(`DELETE FROM user_playlist_tracks WHERE playlist_id IN (SELECT id FROM user_playlists WHERE user_id=?)`).bind(user.id),
+      DB.prepare(`DELETE FROM playlist_hearts WHERE playlist_id IN (SELECT id FROM user_playlists WHERE user_id=?)`).bind(user.id),
+      DB.prepare(`DELETE FROM entity_reactions WHERE kind='playlist' AND entity IN (SELECT id FROM user_playlists WHERE user_id=?)`).bind(user.id),
+      DB.prepare(`DELETE FROM voted_playlist_cache WHERE id IN (SELECT id FROM user_playlists WHERE user_id=?)`).bind(user.id),
+      DB.prepare('DELETE FROM user_playlists WHERE user_id=?').bind(user.id),
+      DB.prepare('DELETE FROM user_song_reactions WHERE user_id=?').bind(user.id),
+      // A visitor cookie can be shared by different signed-in accounts on the
+      // same browser. Never erase another account's aggregate interactions.
+      DB.prepare(`DELETE FROM playlist_hearts WHERE voter IN (SELECT t.voter FROM user_voter_tokens t
+        WHERE t.user_id=? AND NOT EXISTS (SELECT 1 FROM user_voter_tokens other WHERE other.voter=t.voter AND other.user_id<>?))`).bind(user.id,user.id),
+      DB.prepare(`DELETE FROM reactions WHERE voter IN (SELECT t.voter FROM user_voter_tokens t
+        WHERE t.user_id=? AND NOT EXISTS (SELECT 1 FROM user_voter_tokens other WHERE other.voter=t.voter AND other.user_id<>?))`).bind(user.id,user.id),
+      DB.prepare(`DELETE FROM entity_reactions WHERE voter IN (SELECT t.voter FROM user_voter_tokens t
+        WHERE t.user_id=? AND NOT EXISTS (SELECT 1 FROM user_voter_tokens other WHERE other.voter=t.voter AND other.user_id<>?))`).bind(user.id,user.id),
+      DB.prepare(`DELETE FROM requests WHERE voter IN (SELECT t.voter FROM user_voter_tokens t
+        WHERE t.user_id=? AND NOT EXISTS (SELECT 1 FROM user_voter_tokens other WHERE other.voter=t.voter AND other.user_id<>?))`).bind(user.id,user.id),
+      DB.prepare('DELETE FROM user_voter_tokens WHERE user_id=?').bind(user.id),
+      DB.prepare('DELETE FROM user_published_peers WHERE user_id=?').bind(user.id),
+      DB.prepare('DELETE FROM user_peer_permissions WHERE user_id=?').bind(user.id),
+      DB.prepare('DELETE FROM sessions WHERE user_id=?').bind(user.id),
+      DB.prepare('DELETE FROM user_accounts WHERE id=?').bind(user.id),
+    ]);
+    await Promise.all(images.map(p=>env.MUSIC.delete('art/user-playlist/'+p.id).catch(()=>{})));
+    await touchCatalogue(DB);return json({ok:true});
   }
   if (path === "/api/admin/bio/refresh" && m === "POST") {
     const b = await req.json().catch(() => ({}));
@@ -2342,6 +2555,8 @@ async function api(req, env, url, ctx) {
     const b = await req.json().catch(() => ({})), username = clean(b.username,32);
     if (!/^[a-zA-Z0-9_-]{3,32}$/.test(username)) return json({error:"Username must be 3–32 characters using letters, numbers, _ or -."},400);
     if (username.toLowerCase() === "admin") return json({error:"Choose a username other than admin."},400);
+    const current=await DB.prepare("SELECT salt,hash FROM admin WHERE id='admin'").first();
+    if(!current||!safeEq(await pbkdf2(String(b.password||''),current.salt),current.hash))return json({error:'Administrator password is incorrect.'},403);
     if (await DB.prepare("SELECT 1 FROM user_accounts WHERE username = ? COLLATE NOCASE").bind(username).first()) return json({error:"That username is already used by a member."},409);
     await DB.prepare("INSERT INTO settings (key,value) VALUES ('admin_username',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(username).run();
     return json({ok:true,username});

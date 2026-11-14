@@ -617,11 +617,50 @@ function renderPage() {
   if (a === "user" || a === "settings") {
     if(currentAccount?.role === "admin" && a === "settings"){location.replace("/admin.html#account");return;}
     renderNav(a === "settings" ? "settings" : "user");renderSub("",null);
-    const section=a === "settings" ? "settings" : (arg||"private");
-    $("#subbar").hidden = false;$("#subbar").innerHTML = a === "settings" ? "" : `<a href="#user/private" ${section==="private"?'aria-current="page"':""}>Private playlists</a><a href="#user/public" ${section==="public"?'aria-current="page"':""}>Public playlists</a>`;
+    const section=a === "settings" ? (arg||"account") : (arg||"private");
+    $("#subbar").hidden = false;$("#subbar").innerHTML = a === "settings" ? `<a href="#settings/account" ${section==="account"?'aria-current="page"':''}>Account</a><a href="#settings/publish" ${section==="publish"?'aria-current="page"':''}>Publish</a>` : `<a href="#user/private" ${section==="private"?'aria-current="page"':""}>Private playlists</a><a href="#user/public" ${section==="public"?'aria-current="page"':""}>Public playlists</a>`;
     $("#list").innerHTML=`<h1>${a==="settings"?"Account settings":"My playlists"}</h1><div id="myLists">Loading…</div>`;
     (async()=>{const me=await (await fetch("/api/me")).json();if(!me.authenticated){$("#myLists").textContent="Sign in to view your playlists.";return;}
-      if(section==="settings"){$("#myLists").innerHTML=`<div class="settings-panel"><p>Signed in as <strong>${esc(me.username)}</strong></p><h2>Change password</h2><form id="changePasswordForm" class="password-form"><label>Current password<input type="password" name="current" required autocomplete="current-password"></label><label>New password<input type="password" name="password" required minlength="8" autocomplete="new-password"></label><label>Confirm new password<input type="password" name="confirm" required minlength="8" autocomplete="new-password"></label><button class="btn" type="submit">Update password</button><p id="passwordFeedback" role="status"></p></form></div>`;$("#changePasswordForm").onsubmit=async e=>{e.preventDefault();const form=e.currentTarget;const b=Object.fromEntries(new FormData(form));const r=await postJSON("/api/user/password",b);const j=await r.json().catch(()=>({}));$("#passwordFeedback").textContent=r.ok?"Password changed successfully.":j.error||"Password change failed.";if(r.ok)form.reset();};return;}
+      if(a==="settings"){
+        if(me.role!=="user"){$("#myLists").textContent="User account required.";return;}
+        if(section==="publish"){
+          const place=$("#myLists");
+          const r=await fetch("/api/user/publish",{cache:"no-store"});
+          if(!r.ok){place.textContent="Unable to load publishing settings.";return;}
+          const data=await r.json();
+          place.innerHTML=`<div class="settings-panel"><h2>Publish WASP links</h2><p class="muted">Contribute public HTTPS WASP servers to expand the catalogue. Your links are always treated as peers, never as the administrator's primary server. Only administrators can enable this feature per account.</p>
+            ${data.enabled ? `<form id="publishLinkForm" class="form"><input type="url" id="publishUrl" required maxlength="250" placeholder="https://your-wasp.example.org" aria-label="WASP server URL"><button class="btn" type="submit">Add link</button></form>` : `<p class="msg">Publishing has not been enabled for this account by an administrator.</p>`}
+            <p id="publishFeedback" class="msg" role="status"></p><h3>Your submitted links</h3>
+            <div id="myPublishedLinks">${data.links.length ? data.links.map(l=>`<div class="published-peer-row"><div><b>${esc(l.name||'WASP')}</b><p class="muted">${esc(l.url)} · ${l.online?'Online':'Offline'} · ${Number(l.track_count)||0} tracks</p></div><button class="btn ghost" data-unpublish="${esc(l.id)}" type="button">Remove</button></div>`).join("") : '<p class="muted">No links published yet.</p>'}</div></div>`;
+          place.querySelector("#publishLinkForm")?.addEventListener("submit",async e=>{
+            e.preventDefault();const btn=e.currentTarget.querySelector('button');btn.disabled=true;
+            try{const r=await postJSON("/api/user/publish",{url:$("#publishUrl").value});const j=await r.json();
+              if(!r.ok)throw Error(j.error||'Unable to publish link');render();}
+            catch(err){$("#publishFeedback").textContent=err.message;btn.disabled=false;}
+          });
+          place.querySelectorAll('[data-unpublish]').forEach(button=>button.addEventListener('click',async()=>{
+            if(!confirm('Remove this WASP link from your published peers?'))return;
+            const r=await fetch('/api/user/publish/'+encodeURIComponent(button.dataset.unpublish),{method:'DELETE'});
+            if(r.ok)render();else $("#publishFeedback").textContent='Could not remove link.';
+          }));
+          return;
+        }
+        $("#myLists").innerHTML=`<div class="settings-panel"><p>Signed in as <strong>${esc(me.username)}</strong></p>
+          <h2>Change username</h2><form id="changeUsernameForm" class="password-form"><label>New username<input name="username" value="${esc(me.username)}" required minlength="3" maxlength="32" pattern="[A-Za-z0-9_-]{3,32}"></label><label>Current password<input type="password" name="password" required autocomplete="current-password"></label><button class="btn" type="submit">Update username</button><p id="usernameFeedback" role="status"></p></form>
+          <h2>Change password</h2><form id="changePasswordForm" class="password-form"><label>Current password<input type="password" name="current" required autocomplete="current-password"></label><label>New password<input type="password" name="password" required minlength="8" autocomplete="new-password"></label><label>Confirm new password<input type="password" name="confirm" required minlength="8" autocomplete="new-password"></label><button class="btn" type="submit">Update password</button><p id="passwordFeedback" role="status"></p></form></div>`;
+        $("#changeUsernameForm").onsubmit=async e=>{
+          e.preventDefault();const f=e.currentTarget,b=Object.fromEntries(new FormData(f));
+          const r=await postJSON('/api/user/username',b,'PUT');const j=await r.json().catch(()=>({}));
+          $("#usernameFeedback").textContent=r.ok?'Username updated.':j.error||'Username change failed.';
+          if(r.ok) {await refreshAccount();render();}
+        };
+        $("#changePasswordForm").onsubmit=async e=>{
+          e.preventDefault();const f=e.currentTarget,b=Object.fromEntries(new FormData(f));
+          const r=await postJSON('/api/user/password',b);const j=await r.json().catch(()=>({}));
+          $("#passwordFeedback").textContent=r.ok?'Password changed successfully.':j.error||'Password change failed.';
+          if(r.ok)f.reset();
+        };return;
+      }
       const r=await fetch("/api/user/playlists");if(!r.ok){$("#myLists").textContent="Unable to load playlists.";return;}
       const pls=(await r.json()).filter(p=>!!p.is_public===(section==="public"));
       const grid=pls.map(p=>`<div class="tile sq pltile"><div class="covwrap"><a class="covlink" href="#userplaylist/${enc(p.id)}" aria-label="Open ${esc(p.name)}">${ownedPlaylistCover(p)}</a></div><a class="ttl" href="#userplaylist/${enc(p.id)}"><b>${esc(p.name)}</b><span class="muted">${plural((p.tracks||[]).length,"song")}</span></a></div>`).join("");
@@ -1888,7 +1927,7 @@ async function refreshAccount(){
   $("#playlistAdd").hidden = false;
   document.querySelectorAll(".album-add").forEach(b=>b.hidden=false);
 }
-const postJSON=(url,body)=>fetch(url,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});
+const postJSON=(url,body,method="POST")=>fetch(url,{method,headers:{"content-type":"application/json"},body:JSON.stringify(body)});
 function requireUserForPlaylist() {
   if (currentAccount?.role === "user") return false;
   $("#signinRequiredDlg").showModal();

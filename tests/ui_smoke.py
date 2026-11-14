@@ -9,7 +9,7 @@ ROOT=Path(__file__).resolve().parents[1]
 PUBLIC=ROOT/'public'
 html=(PUBLIC/'index.html').read_text().replace('<head>','<head><base href="https://riffvault-test.invalid/">')
 html=re.sub(r'<script[^>]*src="/app\.js"[^>]*></script>','',html)
-html=html.replace('<link rel="stylesheet" href="/style.css">',f'<style>{(PUBLIC/"style.css").read_text()}</style>')
+html=html.replace('<link rel="stylesheet" href="/style.css?v=15.0.5">',f'<style>{(PUBLIC/"style.css").read_text()}</style>')
 art=(PUBLIC/'art.js').read_text().replace('export const ','const ').replace('const artistArt =','const _artistArt =').replace('const albumArt =','const _albumArt =')
 radio=(PUBLIC/'radio.js').read_text().replace('import { artistsOf } from "./art.js";','').replace('export function ','function ').replace('const shuffle =','const radioShuffle =').replace('shuffle(','radioShuffle(')
 app=(PUBLIC/'app.js').read_text()

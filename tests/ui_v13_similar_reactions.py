@@ -5,7 +5,7 @@ from playwright.sync_api import sync_playwright
 P=Path(__file__).resolve().parents[1]/'public'
 html=(P/'index.html').read_text().replace('<head>','<head><base href="https://wasp-test.invalid/">')
 html=re.sub(r'<script[^>]*src="/app\.js"[^>]*></script>','',html)
-html=html.replace('<link rel="stylesheet" href="/style.css">',f'<style>{(P/"style.css").read_text()}</style>')
+html=html.replace('<link rel="stylesheet" href="/style.css?v=15.0.5">',f'<style>{(P/"style.css").read_text()}</style>')
 art=(P/'art.js').read_text().replace('export const ','const ').replace('const artistArt =','const _artistArt =').replace('const albumArt =','const _albumArt =')
 radio=(P/'radio.js').read_text().replace('import { artistsOf } from "./art.js";','').replace('export function ','function ').replace('const shuffle =','const radioShuffle =').replace('shuffle(','radioShuffle(')
 app=re.sub(r'^import .*?;\n','',(P/'app.js').read_text(),count=3,flags=re.M)
