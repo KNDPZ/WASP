@@ -606,3 +606,38 @@ body.sidebar-collapsed .nav-notice-dot.notice-compact{display:block;position:abs
 .recent-streaming img{display:block;width:100%;height:100%;object-fit:contain;animation:wasp-live-pulse 1.7s ease-in-out infinite}
 @keyframes wasp-live-pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.65;transform:scale(.9)}}
 @media (prefers-reduced-motion:reduce){.recent-streaming img{animation:none}}
+
+
+/* WASP v15.0.8 — native, HTML-backed account settings modal.
+   Never unmount or obscure the underlying music player's state. */
+.account-settings-dialog{box-sizing:border-box;width:min(700px,calc(100vw - 28px));max-width:calc(100vw - 28px);max-height:min(810px,calc(100dvh - 30px));overflow:hidden;padding:0;border:1px solid var(--line2);border-radius:20px;background:var(--panel);color:var(--text);box-shadow:0 28px 90px #000c}
+.account-settings-dialog::backdrop{background:rgba(0,0,0,.68);backdrop-filter:blur(3px)}
+.account-settings-dialog #accountSettingsMount{min-height:140px;max-height:calc(100dvh - 32px);display:flex;flex-direction:column;overflow:hidden}
+.settings-modal-shell{display:flex;flex-direction:column;min-height:0;max-height:inherit}
+.settings-modal-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;padding:24px 28px 15px;border-bottom:1px solid var(--line)}
+.settings-modal-head h2{font-size:clamp(20px,3.5vw,26px);margin:0 0 6px}
+.settings-modal-kicker{font-size:11px;font-weight:800;letter-spacing:.15em;color:var(--accent);margin:0 0 5px}
+.settings-modal-description{margin:0;color:var(--muted);font-size:13px}
+.settings-modal-close{display:grid;place-items:center;flex:none;width:38px;height:38px;font-size:26px;line-height:1;border:1px solid var(--line2);border-radius:12px;background:var(--bg);color:var(--text);cursor:pointer}
+.settings-modal-close:hover{color:var(--accent);border-color:var(--accent)}
+.settings-modal-tabs{display:flex;gap:9px;padding:14px 28px 10px;border-bottom:1px solid var(--line)}
+.settings-modal-tabs [data-settings-tab]{position:relative;min-height:40px;padding:0 19px;border-radius:24px;background:transparent;border:1px solid var(--line2);color:var(--muted);font-weight:700;cursor:pointer}
+.settings-modal-tabs [data-settings-tab][aria-selected="true"]{background:var(--accent);color:var(--bg);border-color:var(--accent)}
+.settings-modal-tabs [data-settings-tab]:hover:not([aria-selected="true"]){color:var(--text);border-color:var(--muted)}
+.settings-modal-body{min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:8px 28px 26px;scrollbar-gutter:stable}
+.settings-modal-body .settings-panel{max-width:none;padding:8px 0}
+.settings-modal-body .settings-panel h3{margin:20px 0 8px;font-size:17px}
+.settings-modal-body .settings-panel h3:first-child{margin-top:8px}
+.settings-modal-body .settings-signed-in{margin:4px 0 18px;color:var(--muted);font-size:14px}
+.settings-modal-body .settings-signed-in strong{color:var(--text)}
+.settings-modal-body .password-form{align-items:stretch;gap:12px;margin:12px 0 24px;padding:16px 18px;border:1px solid var(--line2);border-radius:14px;background:var(--bg)}
+.settings-modal-body .password-form label{width:100%;font-size:13px;font-weight:650}
+.settings-modal-body .password-form input{width:100%;max-width:100%;min-width:0;border-radius:999px}
+.settings-modal-body .password-form .btn{align-self:flex-start}
+.settings-modal-body .password-form .msg{margin:0}
+.settings-modal-body .published-peer-row{gap:10px;flex-wrap:wrap}
+.settings-modal-body .published-peer-row .btn{min-height:38px}
+.account-admin-link{display:inline-flex;align-items:center;justify-content:center;text-decoration:none;margin-top:16px}
+.settings-modal-loading{padding:24px}
+@media(max-width:600px){.account-settings-dialog{width:calc(100vw - 16px);max-width:calc(100vw - 16px);max-height:calc(100dvh - 16px);border-radius:15px}.account-settings-dialog #accountSettingsMount{max-height:calc(100dvh - 18px)}.settings-modal-head{padding:17px 18px 12px}.settings-modal-tabs{padding:12px 18px 10px}.settings-modal-body{padding:7px 18px 22px}.settings-modal-body .password-form{padding:14px}.settings-modal-description{font-size:12px}}
+@media(prefers-reduced-motion:reduce){.account-settings-dialog::backdrop{backdrop-filter:none}}

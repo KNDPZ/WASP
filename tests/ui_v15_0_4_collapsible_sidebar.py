@@ -6,7 +6,7 @@ import re
 P=Path(__file__).resolve().parents[1]/'public'
 css=(P/'style.css').read_text()
 html=(P/'index.html').read_text()
-html=html.replace('<link rel="stylesheet" href="/style.css?v=15.0.6">', f'<style>{css}</style>')
+html=re.sub(r'<link rel="stylesheet" href="/style.css(?:\?v=[^"]+)?">', f'<style>{css}</style>',html)
 html=re.sub(r'<script[^>]*src="/app.js(?:\?v=[^"]+)?"[^>]*></script>','',html)
 app_js=re.sub(r'^import .*?;\n','',(P/'app.js').read_text(),count=3,flags=re.M)
 art=(P/'art.js').read_text().replace('export const ','const ').replace('const artistArt =','const _artistArt =').replace('const albumArt =','const _albumArt =')
@@ -18,6 +18,7 @@ MOCK="""
 window.__auth = !!window.__auth;
 window.fetch=async(input,opts={})=>{
  const url=new URL(String(input),'https://wasp-v15.invalid/');let data=[],status=200;
+ if(url.pathname==='/account-settings.html')return new Response(window.__accountHTML,{headers:{'content-type':'text/html'}});
  if(url.pathname==='/api/site')data={name:'WASP',title:'WASP',favicon:0,brand_mode:'text',show_brand_icon:true,sidebar:{enabled:true,bbcode:'[b]Credits[/b] [url=https://github.com/]GitHub[/url]'},ad:{enabled:false,html:'',height:340}};
  else if(url.pathname==='/api/me')data={authenticated:window.__auth,admin:false,role:window.__auth?'user':null};
  else if(url.pathname==='/api/catalog-version')data={revision:'one'};
@@ -36,6 +37,7 @@ try:
     errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
     page.goto('about:blank');page.set_content(html)
     page.evaluate('''()=>{window.__store=window.__store||{}; Object.defineProperty(window,'localStorage',{configurable:true,value:{getItem:k=>window.__store[k]??null,setItem:(k,v)=>window.__store[k]=v,removeItem:k=>delete window.__store[k]}})}''')
+    page.evaluate('(s)=>window.__accountHTML=s',(P/'account-settings.html').read_text())
     page.evaluate('(s)=>(0,eval)(s)',MOCK)
     page.evaluate('(s)=>(0,eval)(s)',bundle)
     page.locator('#nav .nav-item').first.wait_for(timeout=12000)
@@ -85,6 +87,7 @@ try:
     # emulate a new document without trying to fetch a network page
     assert page.evaluate('window.__savedCollapsed')=='true'
     page.set_content(html)
+    page.evaluate('(s)=>window.__accountHTML=s',(P/'account-settings.html').read_text())
     page.evaluate('(s)=>(0,eval)(s)',MOCK)
     page.evaluate('(s)=>(0,eval)(s)',bundle)
     page.wait_for_timeout(300)
@@ -98,7 +101,8 @@ try:
     assert page.locator('#nav .nav-item[href="#user"]').count()==1
     assert page.locator('#nav .nav-item[href="#settings"]').count()==1
     page.locator('#nav .nav-item[href="#settings"]').click()
-    assert page.evaluate('location.hash')=='#settings'
+    assert page.evaluate('location.hash')=='#artists'
+    page.locator('#accountSettingsDialog[open]').wait_for(timeout=10000)
 
     # Mobile uses the existing horizontal text nav even when saved collapsed.
     page.set_viewport_size({'width':390,'height':800})

@@ -554,10 +554,10 @@ function updatePublishNoticeBadges(){
       const frame=nav.querySelector('.nav-icon-frame');if(frame){const compact=dot.cloneNode(true);compact.className='nav-notice-dot notice-compact';frame.appendChild(compact);}
     }
   }
-  const publish=document.querySelector('#subbar a[href="#settings/publish"]');
-  if(publish){publish.querySelectorAll('.publish-subtab-dot').forEach(el=>el.remove());if(visible){
-    const d=document.createElement('span');d.className='publish-subtab-dot';d.setAttribute('aria-label','Publishing permission approved');publish.appendChild(d);
-  }}
+  document.querySelectorAll('#subbar a[href="#settings/publish"], #accountSettingsDialog [data-settings-tab="publish"]').forEach(publish=>{
+    publish.querySelectorAll('.publish-subtab-dot').forEach(el=>el.remove());
+    if(visible){const d=document.createElement('span');d.className='publish-subtab-dot';d.setAttribute('aria-label','Publishing permission approved');publish.appendChild(d);}
+  });
 }
 function renderNav(tab) {
   hideSidebarTooltip();
@@ -627,75 +627,41 @@ async function reactEntity(type, key, kind) {
 const actions = (radio, ent) => `<div class="form" style="margin:12px 0"><button class="btn" data-act="play">Play</button><button class="btn ghost" data-act="shuf">Shuffle</button>${radio ? `<button class="btn ghost" data-act="radio" title="Songs from the same genre, to discover more music"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-radio"/></svg>Radio</button>` : ""}${ent ? reactCircles(ent.type, ent.key) : ""}</div>`;
 const noView = () => { view = { ids: [], label: "", pl: null }; };
 
+let lastBrowseHash = location.hash && !/^#settings(?:\/|$)/.test(location.hash) ? location.hash : "#home";
 function render() {
+  // Old #settings and #settings/publish links still work, but no longer replace
+  // the browser view or destroy the current queue/player/scroll position.
+  if(parse().a === "settings"){
+    const section=parse().arg || "account";
+    try { history.replaceState(history.state, "", location.pathname + location.search + lastBrowseHash); }
+    catch { /* Opaque-origin preview sandboxes may prohibit History updates. */ }
+    // Direct settings bookmarks have no prior music page. Show the normal home
+    // library behind the dialog rather than leaving a blank background.
+    if(!$('#list').childElementCount){renderNav('');renderSub('',null);landing($('#list'));markRows();}
+    void openAccountSettings(section);
+    return;
+  }
   try { renderPage(); }
   catch (e) { console.error(e); $("#list").innerHTML = errorBox("This page couldn't be shown.", String((e && e.message) || e)); noView(); }
 }
 function renderPage() {
   const { a, arg } = parse();
-  if (a === "user" || a === "settings") {
-    if(currentAccount?.role === "admin" && a === "settings"){location.replace("/admin.html#account");return;}
-    renderNav(a === "settings" ? "settings" : "user");renderSub("",null);
-    const section=a === "settings" ? (arg||"account") : (arg||"private");
-    $("#subbar").hidden = false;$("#subbar").innerHTML = a === "settings" ? `<a href="#settings/account" ${section==="account"?'aria-current="page"':''}>Account</a><a href="#settings/publish" ${section==="publish"?'aria-current="page"':''}>Publish</a>` : `<a href="#user/private" ${section==="private"?'aria-current="page"':""}>Private playlists</a><a href="#user/public" ${section==="public"?'aria-current="page"':""}>Public playlists</a>`;
-    updatePublishNoticeBadges();
-    $("#list").innerHTML=`<h1>${a==="settings"?"Account settings":"My playlists"}</h1><div id="myLists">Loading…</div>`;
-    (async()=>{const me=await (await fetch("/api/me")).json();if(!me.authenticated){$("#myLists").textContent="Sign in to view your playlists.";return;}
-      if(a==="settings"){
-        if(me.role!=="user"){$("#myLists").textContent="User account required.";return;}
-        if(section==="publish"){
-          const place=$("#myLists");
-          const r=await fetch("/api/user/publish",{cache:"no-store"});
-          if(!r.ok){place.textContent="Unable to load publishing settings.";return;}
-          const data=await r.json();
-          if(currentAccount){currentAccount.publish_notice=false;updatePublishNoticeBadges();}
-          place.innerHTML=`<div class="settings-panel"><h2>Publish WASP links</h2><p class="muted">Contribute public HTTPS WASP servers to expand the catalogue. Your links are always treated as peers, never as the administrator's primary server. An administrator can enable publishing for individual accounts or for everyone.</p>
-            ${data.enabled ? `<form id="publishLinkForm" class="form"><input type="url" id="publishUrl" required maxlength="250" placeholder="https://your-wasp.example.org" aria-label="WASP server URL"><button class="btn" type="submit">Add link</button></form>` : `<p class="msg">Publishing has not been enabled for this account by an administrator.</p>
-              ${data.request_pending?'<p class="publish-pending">Your request to publish is pending administrator approval.</p>':'<button class="btn" type="button" id="requestPublish">Request to Publish</button>'}`}
-            <p id="publishFeedback" class="msg" role="status"></p><h3>Your submitted links</h3>
-            <div id="myPublishedLinks">${data.links.length ? data.links.map(l=>`<div class="published-peer-row"><div><b>${esc(l.name||'WASP')}</b><p class="muted">${esc(l.url)} · ${l.online?'Online':'Offline'} · ${Number(l.track_count)||0} tracks</p></div><button class="btn ghost" data-unpublish="${esc(l.id)}" type="button">Remove</button></div>`).join("") : '<p class="muted">No links published yet.</p>'}</div></div>`;
-          place.querySelector('#requestPublish')?.addEventListener('click',async e=>{
-            const button=e.currentTarget;button.disabled=true;
-            try{
-              const request=await postJSON('/api/user/publish/request',{});
-              const result=await request.json().catch(()=>({}));
-              if(!request.ok)throw Error(result.error||'Could not send request');
-              render();
-            }catch(error){const feedback=place.querySelector('#publishFeedback');if(feedback)feedback.textContent=error.message;button.disabled=false;}
-          });
-          place.querySelector("#publishLinkForm")?.addEventListener("submit",async e=>{
-            e.preventDefault();const btn=e.currentTarget.querySelector('button');btn.disabled=true;
-            try{const r=await postJSON("/api/user/publish",{url:$("#publishUrl").value});const j=await r.json();
-              if(!r.ok)throw Error(j.error||'Unable to publish link');render();}
-            catch(err){$("#publishFeedback").textContent=err.message;btn.disabled=false;}
-          });
-          place.querySelectorAll('[data-unpublish]').forEach(button=>button.addEventListener('click',async()=>{
-            if(!confirm('Remove this WASP link from your published peers?'))return;
-            const r=await fetch('/api/user/publish/'+encodeURIComponent(button.dataset.unpublish),{method:'DELETE'});
-            if(r.ok)render();else $("#publishFeedback").textContent='Could not remove link.';
-          }));
-          return;
-        }
-        $("#myLists").innerHTML=`<div class="settings-panel"><p>Signed in as <strong>${esc(me.username)}</strong></p>
-          <h2>Change username</h2><form id="changeUsernameForm" class="password-form"><label>New username<input type="text" name="username" value="${esc(me.username)}" required minlength="3" maxlength="32" pattern="[A-Za-z0-9_-]{3,32}"></label><label>Current password<input type="password" name="password" required autocomplete="current-password"></label><button class="btn" type="submit">Update username</button><p id="usernameFeedback" role="status"></p></form>
-          <h2>Change password</h2><form id="changePasswordForm" class="password-form"><label>Current password<input type="password" name="current" required autocomplete="current-password"></label><label>New password<input type="password" name="password" required minlength="8" autocomplete="new-password"></label><label>Confirm new password<input type="password" name="confirm" required minlength="8" autocomplete="new-password"></label><button class="btn" type="submit">Update password</button><p id="passwordFeedback" role="status"></p></form></div>`;
-        $("#changeUsernameForm").onsubmit=async e=>{
-          e.preventDefault();const f=e.currentTarget,b=Object.fromEntries(new FormData(f));
-          const r=await postJSON('/api/user/username',b,'PUT');const j=await r.json().catch(()=>({}));
-          $("#usernameFeedback").textContent=r.ok?'Username updated.':j.error||'Username change failed.';
-          if(r.ok) {await refreshAccount();render();}
-        };
-        $("#changePasswordForm").onsubmit=async e=>{
-          e.preventDefault();const f=e.currentTarget,b=Object.fromEntries(new FormData(f));
-          const r=await postJSON('/api/user/password',b);const j=await r.json().catch(()=>({}));
-          $("#passwordFeedback").textContent=r.ok?'Password changed successfully.':j.error||'Password change failed.';
-          if(r.ok)f.reset();
-        };return;
-      }
-      const r=await fetch("/api/user/playlists");if(!r.ok){$("#myLists").textContent="Unable to load playlists.";return;}
-      const pls=(await r.json()).filter(p=>!!p.is_public===(section==="public"));
-      const grid=pls.map(p=>`<div class="tile sq pltile"><div class="covwrap"><a class="covlink" href="#userplaylist/${enc(p.id)}" aria-label="Open ${esc(p.name)}">${ownedPlaylistCover(p)}</a></div><a class="ttl" href="#userplaylist/${enc(p.id)}"><b>${esc(p.name)}</b><span class="muted">${plural((p.tracks||[]).length,"song")}</span></a></div>`).join("");
-      $("#myLists").innerHTML=grid?`<div class="grid s">${grid}</div>`:empty("No playlists yet. Use + in the player to create one.");
+  if (a === "user") {
+    renderNav("user");renderSub("",null);
+    const section=arg||"private";
+    $("#subbar").hidden=false;
+    $("#subbar").innerHTML=`<a href="#user/private" ${section==="private"?'aria-current="page"':""}>Private playlists</a><a href="#user/public" ${section==="public"?'aria-current="page"':""}>Public playlists</a>`;
+    $("#list").innerHTML='<h1>My playlists</h1><div id="myLists">Loading…</div>';
+    (async()=>{
+      const place=$("#myLists");
+      try {
+        const me=await (await fetch("/api/me")).json();
+        if(!me.authenticated){place.textContent="Sign in to view your playlists.";return;}
+        const r=await fetch("/api/user/playlists");if(!r.ok){place.textContent="Unable to load playlists.";return;}
+        const pls=(await r.json()).filter(p=>!!p.is_public===(section==="public"));
+        const grid=pls.map(p=>`<div class="tile sq pltile"><div class="covwrap"><a class="covlink" href="#userplaylist/${enc(p.id)}" aria-label="Open ${esc(p.name)}">${ownedPlaylistCover(p)}</a></div><a class="ttl" href="#userplaylist/${enc(p.id)}"><b>${esc(p.name)}</b><span class="muted">${plural((p.tracks||[]).length,"song")}</span></a></div>`).join("");
+        if(place.isConnected)place.innerHTML=grid?`<div class="grid s">${grid}</div>`:empty("No playlists yet. Use + in the player to create one.");
+      } catch {if(place.isConnected)place.textContent='Unable to load playlists.';}
     })();return;
   }
   if(a==="userplaylist"){
@@ -1840,7 +1806,12 @@ $("#list").addEventListener("click", (e) => {
   if (r) startQueue(view.ids, r.dataset.id, view.label, view.pl);
 });
 $("#uplist").addEventListener("click", (e) => { const r = e.target.closest(".qrow"); if (r) play(r.dataset.id); });
-window.addEventListener("hashchange", () => { render(); window.scrollTo(0, 0); });
+window.addEventListener("hashchange", () => {
+  if(parse().a === "settings"){render();return;}
+  lastBrowseHash = location.hash || "#home";
+  if($("#accountSettingsDialog")?.open)$("#accountSettingsDialog").close();
+  render();window.scrollTo(0, 0);
+});
 $("#q").addEventListener("input", (e) => { query = e.target.value.trim().toLowerCase(); if (parse().a !== "request") render(); });
 $("#pp").addEventListener("click", () => {
   if (audio.src) return audio.paused ? audio.play() : audio.pause();
@@ -2043,6 +2014,158 @@ async function refreshAccount(){
   document.querySelectorAll(".album-add").forEach(b=>b.hidden=false);
 }
 const postJSON=(url,body,method="POST")=>fetch(url,{method,headers:{"content-type":"application/json"},body:JSON.stringify(body)});
+
+// WASP v15.0.8 — settings are an independent HTML-backed dialog. The music
+// app, audio element, current page and scroll position are never remounted.
+let accountSettingsTemplate = null;
+let accountSettingsOpenToken = 0;
+let accountSettingsTabToken = 0;
+const accountSettingsDialog = $("#accountSettingsDialog");
+const accountSettingsMount = $("#accountSettingsMount");
+function settingsTab(value){return value === "publish" ? "publish" : "account";}
+function settingsFeedback(node,message,error=false){
+  if(!node)return;
+  node.textContent=message;
+  node.classList.toggle('err',Boolean(error));
+}
+async function renderAccountSettingsSection(which="account"){
+  const d=accountSettingsDialog;
+  if(!d?.open)return;
+  which=settingsTab(which);
+  const token=++accountSettingsTabToken;
+  const root=d.querySelector('#accountSettingsLayout');
+  if(!root)return;
+  root.querySelectorAll('[data-settings-tab]').forEach(button=>{
+    const selected=button.dataset.settingsTab===which;
+    button.setAttribute('aria-selected',String(selected));
+    button.tabIndex=selected?0:-1;
+  });
+  const place=root.querySelector('#accountSettingsContent');
+  place.innerHTML='<p class="muted">Loading settings…</p>';
+  try {
+    const res=await fetch('/api/me',{cache:'no-store'});
+    if(!res.ok)throw Error('Unable to check your account session.');
+    const me=await res.json();
+    if(token!==accountSettingsTabToken || !d.open)return;
+    if(!me.authenticated){
+      place.innerHTML='<p>Sign in to manage your account.</p><button type="button" class="btn" id="settingsSignIn">Sign in</button>';
+      place.querySelector('#settingsSignIn').onclick=()=>{d.close();$('#dlg').showModal();$('#lid').focus();};
+      return;
+    }
+    if(me.role!=='user'){
+      place.innerHTML='<p>Administrator account settings are managed in the admin dashboard.</p><a class="btn account-admin-link" href="/admin.html#account">Open admin account settings</a>';
+      return;
+    }
+    if(which==='publish'){
+      const res=await fetch('/api/user/publish',{cache:'no-store'});
+      if(!res.ok)throw Error('Unable to load publishing settings.');
+      const data=await res.json();
+      if(token!==accountSettingsTabToken || !d.open)return;
+      if(currentAccount){currentAccount.publish_notice=false;updatePublishNoticeBadges();}
+      place.innerHTML=`<div class="settings-panel"><h3>Publish WASP links</h3><p class="muted">Contribute public HTTPS WASP servers to expand the catalogue. Links are added as peers only, never as the administrator's primary server. Publishing requires permission from an administrator.</p>
+        ${data.enabled ? `<form id="publishLinkForm" class="form"><input type="url" id="publishUrl" required maxlength="250" placeholder="https://your-wasp.example.org" aria-label="WASP server URL"><button class="btn" type="submit">Add link</button></form>` : `<p class="msg">Publishing has not been enabled for this account.</p>${data.request_pending?'<p class="publish-pending">Your request to publish is pending administrator approval.</p>':'<button class="btn" type="button" id="requestPublish">Request to Publish</button>'}`}
+        <p id="publishFeedback" class="msg" role="status" aria-live="polite"></p><h3>Your submitted links</h3>
+        <div id="myPublishedLinks">${Array.isArray(data.links) && data.links.length ? data.links.map(l=>`<div class="published-peer-row"><div><b>${esc(l.name||'WASP')}</b><p class="muted">${esc(l.url)} · ${l.online?'Online':'Offline'} · ${Number(l.track_count)||0} tracks</p></div><button class="btn ghost" data-unpublish="${esc(l.id)}" type="button">Remove</button></div>`).join('') : '<p class="muted">No links published yet.</p>'}</div></div>`;
+      place.querySelector('#requestPublish')?.addEventListener('click',async e=>{
+        const button=e.currentTarget;button.disabled=true;
+        try {const r=await postJSON('/api/user/publish/request',{});const j=await r.json().catch(()=>({}));if(!r.ok)throw Error(j.error||'Could not send request.');await renderAccountSettingsSection('publish');}
+        catch(err){settingsFeedback(place.querySelector('#publishFeedback'),err.message,true);button.disabled=false;}
+      });
+      place.querySelector('#publishLinkForm')?.addEventListener('submit',async e=>{
+        e.preventDefault();const form=e.currentTarget,button=form.querySelector('button');button.disabled=true;
+        try {const r=await postJSON('/api/user/publish',{url:form.querySelector('#publishUrl').value});const j=await r.json().catch(()=>({}));if(!r.ok)throw Error(j.error||'Unable to publish link.');await renderAccountSettingsSection('publish');}
+        catch(err){settingsFeedback(place.querySelector('#publishFeedback'),err.message,true);button.disabled=false;}
+      });
+      place.querySelectorAll('[data-unpublish]').forEach(button=>button.addEventListener('click',async()=>{
+        if(!confirm('Remove this WASP link from your published peers?'))return;
+        button.disabled=true;
+        try {const r=await fetch('/api/user/publish/'+encodeURIComponent(button.dataset.unpublish),{method:'DELETE'});if(!r.ok)throw Error('Could not remove link.');await renderAccountSettingsSection('publish');}
+        catch(err){settingsFeedback(place.querySelector('#publishFeedback'),err.message,true);button.disabled=false;}
+      }));
+      return;
+    }
+    place.innerHTML=`<div class="settings-panel"><p class="settings-signed-in">Signed in as <strong>${esc(me.username)}</strong></p>
+      <h3>Change username</h3><form id="changeUsernameForm" class="password-form"><label>New username<input type="text" name="username" value="${esc(me.username)}" required minlength="3" maxlength="32" pattern="[A-Za-z0-9_-]{3,32}" autocomplete="username"></label><label>Current password<input type="password" name="password" required autocomplete="current-password"></label><button class="btn" type="submit">Update username</button><p id="usernameFeedback" class="msg" role="status" aria-live="polite"></p></form>
+      <h3>Change password</h3><form id="changePasswordForm" class="password-form"><label>Current password<input type="password" name="current" required autocomplete="current-password"></label><label>New password<input type="password" name="password" required minlength="8" autocomplete="new-password"></label><label>Confirm new password<input type="password" name="confirm" required minlength="8" autocomplete="new-password"></label><button class="btn" type="submit">Update password</button><p id="passwordFeedback" class="msg" role="status" aria-live="polite"></p></form></div>`;
+    place.querySelector('#changeUsernameForm').addEventListener('submit',async e=>{
+      e.preventDefault();const form=e.currentTarget,button=form.querySelector('button');button.disabled=true;
+      try {const data=Object.fromEntries(new FormData(form));const r=await postJSON('/api/user/username',data,'PUT');const j=await r.json().catch(()=>({}));
+        if(!r.ok)throw Error(j.error||'Username change failed.');
+        form.elements.password.value='';await refreshAccount();
+        if(!form.isConnected)return;
+        place.querySelector('.settings-signed-in strong').textContent=currentAccount?.username||data.username;
+        form.elements.username.value=currentAccount?.username||data.username;
+        settingsFeedback(place.querySelector('#usernameFeedback'),'Username updated.');
+      }catch(err){settingsFeedback(place.querySelector('#usernameFeedback'),err.message,true);}
+      finally{button.disabled=false;}
+    });
+    place.querySelector('#changePasswordForm').addEventListener('submit',async e=>{
+      e.preventDefault();const form=e.currentTarget,button=form.querySelector('button');button.disabled=true;
+      try {const r=await postJSON('/api/user/password',Object.fromEntries(new FormData(form)));const j=await r.json().catch(()=>({}));
+        if(!r.ok)throw Error(j.error||'Password change failed.');form.reset();
+        settingsFeedback(place.querySelector('#passwordFeedback'),'Password changed successfully.');
+      }catch(err){settingsFeedback(place.querySelector('#passwordFeedback'),err.message,true);}
+      finally{button.disabled=false;}
+    });
+  }catch(err){
+    if(token===accountSettingsTabToken && d.open){
+      place.replaceChildren();const feedback=document.createElement('p');feedback.className='msg err';feedback.setAttribute('role','alert');feedback.textContent=err.message||'Unable to load settings.';place.append(feedback);
+      const retry=document.createElement('button');retry.type='button';retry.className='btn ghost';retry.textContent='Retry';retry.onclick=()=>renderAccountSettingsSection(which);place.append(retry);
+    }
+  }
+}
+async function openAccountSettings(section='account'){
+  if(!accountSettingsDialog)return;
+  section=settingsTab(section);
+  $('#accountDrop')?.classList.add('hidden');hideSidebarTooltip();
+  if(accountSettingsDialog.open && accountSettingsMount.querySelector('#accountSettingsLayout')){
+    void renderAccountSettingsSection(section);return;
+  }
+  const token=++accountSettingsOpenToken;
+  if(!accountSettingsDialog.open)accountSettingsDialog.showModal();
+  accountSettingsMount.innerHTML='<p class="muted settings-modal-loading">Loading account settings…</p>';
+  try{
+    if(!accountSettingsTemplate){
+      const r=await fetch('/account-settings.html',{cache:'no-store'});
+      if(!r.ok)throw Error('Unable to load the account settings interface.');
+      const doc=new DOMParser().parseFromString(await r.text(),'text/html');
+      const node=doc.querySelector('#accountSettingsLayout');
+      if(!node)throw Error('Account settings interface is unavailable.');
+      accountSettingsTemplate=node;
+    }
+    if(token!==accountSettingsOpenToken||!accountSettingsDialog.open)return;
+    accountSettingsMount.replaceChildren(accountSettingsTemplate.cloneNode(true));
+    accountSettingsMount.querySelector('#accountSettingsClose').onclick=()=>accountSettingsDialog.close();
+    accountSettingsMount.querySelectorAll('[data-settings-tab]').forEach(button=>{
+      button.onclick=()=>renderAccountSettingsSection(button.dataset.settingsTab);
+      button.addEventListener('keydown',e=>{
+        if(!['ArrowLeft','ArrowRight'].includes(e.key))return;
+        e.preventDefault();const next=button.dataset.settingsTab==='account'?'publish':'account';
+        const target=accountSettingsMount.querySelector(`[data-settings-tab="${next}"]`);
+        target.focus();void renderAccountSettingsSection(next);
+      });
+    });
+    void renderAccountSettingsSection(section);
+  }catch(err){
+    if(token===accountSettingsOpenToken && accountSettingsDialog.open){
+      accountSettingsMount.replaceChildren();const msg=document.createElement('p');msg.className='msg err';msg.textContent=err.message||'Unable to load settings.';accountSettingsMount.append(msg);
+      const retry=document.createElement('button');retry.type='button';retry.className='btn ghost';retry.textContent='Retry';retry.onclick=()=>openAccountSettings(section);accountSettingsMount.append(retry);
+    }
+  }
+}
+accountSettingsDialog?.addEventListener('close',()=>{
+  accountSettingsOpenToken++;accountSettingsTabToken++;
+  accountSettingsMount.replaceChildren();
+});
+accountSettingsDialog?.addEventListener('click',e=>{if(e.target===accountSettingsDialog)accountSettingsDialog.close();});
+// Capture before the browser changes its hash; do not navigate or repaint the
+// music page when settings is opened from the sidebar or the account dropdown.
+document.addEventListener('click',e=>{
+  const anchor=e.target.closest('a[href="#settings"],a[href^="#settings/"]');
+  if(!anchor || e.defaultPrevented || e.button!==0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey)return;
+  e.preventDefault();void openAccountSettings(anchor.getAttribute('href').split('/')[1]||'account');
+},true);
+
 function requireUserForPlaylist() {
   if (currentAccount?.role === "user") return false;
   $("#signinRequiredDlg").showModal();

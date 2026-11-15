@@ -6,7 +6,7 @@ import json
 
 ROOT=Path(__file__).resolve().parents[1]/'public'
 css=(ROOT/'style.css').read_text()
-app_html=(ROOT/'index.html').read_text().replace('<link rel="stylesheet" href="/style.css?v=15.0.6">',f'<style>{css}</style>')
+app_html=re.sub(r'<link rel="stylesheet" href="/style.css(?:\?v=[^"]+)?">',f'<style>{css}</style>',(ROOT/'index.html').read_text())
 app_html=re.sub(r'<script[^>]*src="/app.js(?:\?v=[^"]+)?"[^>]*></script>','',app_html)
 admin_html=(ROOT/'admin.html').read_text().replace('<link rel="stylesheet" href="/style.css?v=15.0.6">',f'<style>{css}</style>')
 admin_html=re.sub(r'<script[^>]*src="/admin.js(?:\?v=[^"]+)?"[^>]*></script>','',admin_html)
@@ -22,6 +22,7 @@ window.__mock={permission:false,deleted:false,username:'alice2',published:1};win
 window.fetch=async(input,opts={})=>{
  const url=new URL(String(input),'https://wasp-v15.invalid'),p=url.pathname,method=opts.method||'GET';
  const mock=window.__mock;let data={ok:true},status=200;
+ if(p==='/account-settings.html')return new Response(window.__accountHTML,{headers:{'content-type':'text/html'}});
  if(p==='/api/me')data=window.__isAdmin?{authenticated:true,admin:true,role:'admin',username:'owner'}:{authenticated:true,admin:false,role:'user',username:mock.username};
  else if(p==='/api/site')data={name:'WASP',title:'WASP',show_brand_icon:true,sidebar:{enabled:false},ad:{enabled:false}};
  else if(p==='/api/catalog-version')data={revision:'x'};
@@ -56,14 +57,15 @@ try:
   errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
   page.goto('about:blank')
   page.set_content(app_html)
+  page.evaluate('(s)=>window.__accountHTML=s',(ROOT/'account-settings.html').read_text())
   page.evaluate('(s)=>(0,eval)(s)',MOCK)
   page.evaluate('location.hash="#settings/publish"')
   page.evaluate('(s)=>(0,eval)(s)',app_bundle)
   page.locator('#myPublishedLinks').wait_for(timeout=15000)
-  assert page.locator('#subbar a[href="#settings/publish"]').count()==1
+  assert page.locator('#accountSettingsDialog[open] [data-settings-tab="publish"]').count()==1
   assert page.get_by_text('Peer WASP').count()>=1
   assert page.locator('#publishLinkForm').is_visible()
-  page.locator('#subbar a[href="#settings/account"]').click()
+  page.locator('[data-settings-tab="account"]').click()
   page.locator('#changeUsernameForm').wait_for(timeout=10000)
   page.locator('#changeUsernameForm input[name=username]').fill('new-account')
   page.locator('#changeUsernameForm input[name=password]').fill('password')

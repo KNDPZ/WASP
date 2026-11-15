@@ -20,6 +20,7 @@ window.__mock={global:false,pending:false,approved:false,canPublish:false,publis
 window.fetch=async(input,opts={})=>{
  const p=new URL(String(input),'https://wasp.invalid').pathname,method=opts.method||'GET';
  const mock=window.__mock;let body={},code=200;
+ if(p==='/account-settings.html')return new Response(window.__accountHTML,{headers:{'content-type':'text/html'}});
  if(p==='/api/me')body=window.__isAdmin?{authenticated:true,admin:true,role:'admin',username:'owner'}:{authenticated:true,admin:false,role:'user',username:'test',publish_notice:mock.approved};
  else if(p==='/api/site')body={name:'WASP',title:'WASP',sidebar:{enabled:false},ad:{enabled:false}};
  else if(p==='/api/catalog-version')body={revision:'a'};
@@ -91,6 +92,7 @@ with sync_playwright() as pw:
   u=browser.new_page(viewport={'width':1280,'height':850})
   user_errors=[];u.on('pageerror',lambda e:user_errors.append(str(e)))
   u.goto('about:blank');u.set_content(index)
+  u.evaluate('(s)=>window.__accountHTML=s',(ROOT/'account-settings.html').read_text())
   u.evaluate('(s)=>(0,eval)(s)',MOCK)
   u.evaluate('location.hash="#settings/publish"')
   u.evaluate('(s)=>(0,eval)(s)',app_bundle)
@@ -100,7 +102,7 @@ with sync_playwright() as pw:
   u.evaluate('window.__mock.approved=true;window.__mock.canPublish=true;window.__mock.pending=false')
   u.evaluate('(async()=>await refreshAccount())()')
   u.locator('#nav a[href="#settings"] .notice-expanded').wait_for(timeout=10000)
-  u.locator('#subbar .publish-subtab-dot').wait_for(timeout=10000)
+  u.locator('#accountSettingsDialog .publish-subtab-dot').wait_for(timeout=10000)
   settings_row=u.locator('#nav a[href="#settings"]')
   expanded_dot=settings_row.locator('.notice-expanded')
   assert 'nav-has-notices' in (settings_row.get_attribute('class') or '')
@@ -110,6 +112,7 @@ with sync_playwright() as pw:
   assert 0 <= (row_bounds['x']+row_bounds['width'])-(dot_bounds['x']+dot_bounds['width']) <= 16, (row_bounds,dot_bounds)
   dislikes_bounds=u.locator('#nav a[href="#dislikes"]').bounding_box()
   assert dot_bounds['y'] > dislikes_bounds['y']+dislikes_bounds['height'], (dot_bounds,dislikes_bounds)
+  u.locator('#accountSettingsClose').click()
   u.locator('#sidebarToggle').click()
   compact_dot=settings_row.locator('.notice-compact')
   compact_dot.wait_for(state='visible',timeout=10000)
@@ -118,14 +121,14 @@ with sync_playwright() as pw:
   compact_bounds=compact_dot.bounding_box()
   assert icon_bounds['x'] <= compact_bounds['x'] <= icon_bounds['x']+icon_bounds['width'], (icon_bounds,compact_bounds)
   assert icon_bounds['y'] <= compact_bounds['y'] <= icon_bounds['y']+icon_bounds['height'], (icon_bounds,compact_bounds)
-  u.evaluate('location.hash="#settings/account"')
+  u.evaluate('document.querySelector(\'#nav a[href="#settings"]\').click()')
   u.locator('#changeUsernameForm').wait_for(timeout=10000)
   assert u.locator('#changeUsernameForm input[name=username]').get_attribute('type')=='text'
   assert u.locator('#changeUsernameForm input[name=username]').evaluate('e=>getComputedStyle(e).borderRadius')=='999px'
-  u.locator('#subbar a[href="#settings/publish"]').click()
+  u.locator('[data-settings-tab="publish"]').click()
   u.locator('#publishLinkForm').wait_for(timeout=10000)
   assert u.locator('#nav a[href="#settings"] .notice-expanded').count()==0
-  assert u.locator('#subbar .publish-subtab-dot').count()==0
+  assert u.locator('#accountSettingsDialog .publish-subtab-dot').count()==0
   assert not [e for e in user_errors if 'not defined' in e or 'Cannot' in e],user_errors
   print('PASS v15.0.6 UI: Users search/sorts/global switch/badges, rounded username inputs, publish request, approved notice, collapsed icon badge acknowledgement')
   browser.close()
