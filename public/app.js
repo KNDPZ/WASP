@@ -545,6 +545,8 @@ function updatePublishNoticeBadges(){
   const visible=!!(currentAccount?.authenticated&&currentAccount?.role==='user'&&currentAccount.publish_notice);
   const nav=document.querySelector('#nav a[href="#settings"]');
   if(nav){
+    // Anchor the expanded notification to Account settings, not the sidebar.
+    nav.classList.toggle('nav-has-notices', visible);
     nav.querySelectorAll('.nav-notice-dot').forEach(n=>n.remove());
     if(visible){
       const dot=document.createElement('span');dot.className='nav-notice-dot notice-expanded';dot.setAttribute('aria-label','Publishing permission approved');nav.appendChild(dot);
