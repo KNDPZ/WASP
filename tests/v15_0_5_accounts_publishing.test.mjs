@@ -34,7 +34,7 @@ globalThis.fetch=async(input,opts)=>{
 };
 try {
   assert.equal((await call('/api/me')).code,200);
-  assert.equal(sqlite.prepare("SELECT value FROM settings WHERE key='wasp_schema_version'").get().value,'15.2');
+  assert.equal(sqlite.prepare("SELECT value FROM settings WHERE key='wasp_schema_version'").get().value,'15.3');
   assert.ok(sqlite.prepare("SELECT name FROM sqlite_master WHERE name='user_published_peers'").get());
   sqlite.prepare("UPDATE admin SET salt=?,hash=? WHERE id='admin'").run(salt,await pbkdf2(password,salt));
   const admin=(await call('/api/login','POST',{id:'admin',password})).cookie;

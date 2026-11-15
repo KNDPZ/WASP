@@ -6,9 +6,9 @@ import json
 
 ROOT=Path(__file__).resolve().parents[1]/'public'
 css=(ROOT/'style.css').read_text()
-app_html=(ROOT/'index.html').read_text().replace('<link rel="stylesheet" href="/style.css?v=15.0.5">',f'<style>{css}</style>')
+app_html=(ROOT/'index.html').read_text().replace('<link rel="stylesheet" href="/style.css?v=15.0.6">',f'<style>{css}</style>')
 app_html=re.sub(r'<script[^>]*src="/app.js(?:\?v=[^"]+)?"[^>]*></script>','',app_html)
-admin_html=(ROOT/'admin.html').read_text().replace('<link rel="stylesheet" href="/style.css?v=15.0.5">',f'<style>{css}</style>')
+admin_html=(ROOT/'admin.html').read_text().replace('<link rel="stylesheet" href="/style.css?v=15.0.6">',f'<style>{css}</style>')
 admin_html=re.sub(r'<script[^>]*src="/admin.js(?:\?v=[^"]+)?"[^>]*></script>','',admin_html)
 art=(ROOT/'art.js').read_text().replace('export const ','const ').replace('const artistArt =','const _artistArt =').replace('const albumArt =','const _albumArt =')
 radio=(ROOT/'radio.js').read_text().replace('import { artistsOf } from "./art.js";','').replace('export function ','function ').replace('const shuffle =','const radioShuffle =').replace('shuffle(','radioShuffle(')

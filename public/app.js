@@ -541,10 +541,26 @@ function parse() {
   return { a: i < 0 ? raw : raw.slice(0, i), arg: i < 0 ? "" : raw.slice(i + 1) };
 }
 // Left menu is only the main sections. Sub tabs live in the sticky bar under search.
+function updatePublishNoticeBadges(){
+  const visible=!!(currentAccount?.authenticated&&currentAccount?.role==='user'&&currentAccount.publish_notice);
+  const nav=document.querySelector('#nav a[href="#settings"]');
+  if(nav){
+    nav.querySelectorAll('.nav-notice-dot').forEach(n=>n.remove());
+    if(visible){
+      const dot=document.createElement('span');dot.className='nav-notice-dot notice-expanded';dot.setAttribute('aria-label','Publishing permission approved');nav.appendChild(dot);
+      const frame=nav.querySelector('.nav-icon-frame');if(frame){const compact=dot.cloneNode(true);compact.className='nav-notice-dot notice-compact';frame.appendChild(compact);}
+    }
+  }
+  const publish=document.querySelector('#subbar a[href="#settings/publish"]');
+  if(publish){publish.querySelectorAll('.publish-subtab-dot').forEach(el=>el.remove());if(visible){
+    const d=document.createElement('span');d.className='publish-subtab-dot';d.setAttribute('aria-label','Publishing permission approved');publish.appendChild(d);
+  }}
+}
 function renderNav(tab) {
   hideSidebarTooltip();
   $("#nav").innerHTML = Object.entries(TABS).filter(([k]) => !["user","settings"].includes(k) || currentAccount?.authenticated).map(([k, v]) =>
     `<a class="nav-item" href="#${k}" aria-label="${esc(v)}" data-label="${esc(v)}"${k === tab ? ' aria-current="page"' : ""}><span class="nav-icon-frame" aria-hidden="true"><img class="nav-icon${k === "hearts" ? " nav-icon-color" : ""}" src="${NAV_ICONS[k]}" alt=""></span><span class="nav-label">${esc(v)}</span></a>`).join("");
+  updatePublishNoticeBadges();
 }
 function renderSub(tab, sub) {
   const bar = $("#subbar");
@@ -619,6 +635,7 @@ function renderPage() {
     renderNav(a === "settings" ? "settings" : "user");renderSub("",null);
     const section=a === "settings" ? (arg||"account") : (arg||"private");
     $("#subbar").hidden = false;$("#subbar").innerHTML = a === "settings" ? `<a href="#settings/account" ${section==="account"?'aria-current="page"':''}>Account</a><a href="#settings/publish" ${section==="publish"?'aria-current="page"':''}>Publish</a>` : `<a href="#user/private" ${section==="private"?'aria-current="page"':""}>Private playlists</a><a href="#user/public" ${section==="public"?'aria-current="page"':""}>Public playlists</a>`;
+    updatePublishNoticeBadges();
     $("#list").innerHTML=`<h1>${a==="settings"?"Account settings":"My playlists"}</h1><div id="myLists">Loading…</div>`;
     (async()=>{const me=await (await fetch("/api/me")).json();if(!me.authenticated){$("#myLists").textContent="Sign in to view your playlists.";return;}
       if(a==="settings"){
@@ -628,10 +645,21 @@ function renderPage() {
           const r=await fetch("/api/user/publish",{cache:"no-store"});
           if(!r.ok){place.textContent="Unable to load publishing settings.";return;}
           const data=await r.json();
-          place.innerHTML=`<div class="settings-panel"><h2>Publish WASP links</h2><p class="muted">Contribute public HTTPS WASP servers to expand the catalogue. Your links are always treated as peers, never as the administrator's primary server. Only administrators can enable this feature per account.</p>
-            ${data.enabled ? `<form id="publishLinkForm" class="form"><input type="url" id="publishUrl" required maxlength="250" placeholder="https://your-wasp.example.org" aria-label="WASP server URL"><button class="btn" type="submit">Add link</button></form>` : `<p class="msg">Publishing has not been enabled for this account by an administrator.</p>`}
+          if(currentAccount){currentAccount.publish_notice=false;updatePublishNoticeBadges();}
+          place.innerHTML=`<div class="settings-panel"><h2>Publish WASP links</h2><p class="muted">Contribute public HTTPS WASP servers to expand the catalogue. Your links are always treated as peers, never as the administrator's primary server. An administrator can enable publishing for individual accounts or for everyone.</p>
+            ${data.enabled ? `<form id="publishLinkForm" class="form"><input type="url" id="publishUrl" required maxlength="250" placeholder="https://your-wasp.example.org" aria-label="WASP server URL"><button class="btn" type="submit">Add link</button></form>` : `<p class="msg">Publishing has not been enabled for this account by an administrator.</p>
+              ${data.request_pending?'<p class="publish-pending">Your request to publish is pending administrator approval.</p>':'<button class="btn" type="button" id="requestPublish">Request to Publish</button>'}`}
             <p id="publishFeedback" class="msg" role="status"></p><h3>Your submitted links</h3>
             <div id="myPublishedLinks">${data.links.length ? data.links.map(l=>`<div class="published-peer-row"><div><b>${esc(l.name||'WASP')}</b><p class="muted">${esc(l.url)} · ${l.online?'Online':'Offline'} · ${Number(l.track_count)||0} tracks</p></div><button class="btn ghost" data-unpublish="${esc(l.id)}" type="button">Remove</button></div>`).join("") : '<p class="muted">No links published yet.</p>'}</div></div>`;
+          place.querySelector('#requestPublish')?.addEventListener('click',async e=>{
+            const button=e.currentTarget;button.disabled=true;
+            try{
+              const request=await postJSON('/api/user/publish/request',{});
+              const result=await request.json().catch(()=>({}));
+              if(!request.ok)throw Error(result.error||'Could not send request');
+              render();
+            }catch(error){const feedback=place.querySelector('#publishFeedback');if(feedback)feedback.textContent=error.message;button.disabled=false;}
+          });
           place.querySelector("#publishLinkForm")?.addEventListener("submit",async e=>{
             e.preventDefault();const btn=e.currentTarget.querySelector('button');btn.disabled=true;
             try{const r=await postJSON("/api/user/publish",{url:$("#publishUrl").value});const j=await r.json();
@@ -646,7 +674,7 @@ function renderPage() {
           return;
         }
         $("#myLists").innerHTML=`<div class="settings-panel"><p>Signed in as <strong>${esc(me.username)}</strong></p>
-          <h2>Change username</h2><form id="changeUsernameForm" class="password-form"><label>New username<input name="username" value="${esc(me.username)}" required minlength="3" maxlength="32" pattern="[A-Za-z0-9_-]{3,32}"></label><label>Current password<input type="password" name="password" required autocomplete="current-password"></label><button class="btn" type="submit">Update username</button><p id="usernameFeedback" role="status"></p></form>
+          <h2>Change username</h2><form id="changeUsernameForm" class="password-form"><label>New username<input type="text" name="username" value="${esc(me.username)}" required minlength="3" maxlength="32" pattern="[A-Za-z0-9_-]{3,32}"></label><label>Current password<input type="password" name="password" required autocomplete="current-password"></label><button class="btn" type="submit">Update username</button><p id="usernameFeedback" role="status"></p></form>
           <h2>Change password</h2><form id="changePasswordForm" class="password-form"><label>Current password<input type="password" name="current" required autocomplete="current-password"></label><label>New password<input type="password" name="password" required minlength="8" autocomplete="new-password"></label><label>Confirm new password<input type="password" name="confirm" required minlength="8" autocomplete="new-password"></label><button class="btn" type="submit">Update password</button><p id="passwordFeedback" role="status"></p></form></div>`;
         $("#changeUsernameForm").onsubmit=async e=>{
           e.preventDefault();const f=e.currentTarget,b=Object.fromEntries(new FormData(f));
@@ -1923,6 +1951,7 @@ async function refreshAccount(){
   $("#whoami").textContent=currentAccount?.authenticated?currentAccount.username:"Sign In";
   $("#accountMenu").classList.toggle("signed-in",!!currentAccount?.authenticated);
   if(!currentAccount?.authenticated)$("#accountDrop").classList.add("hidden");
+  updatePublishNoticeBadges();
   // Keep + visible to guests; it opens a themed sign-in requirement dialog.
   $("#playlistAdd").hidden = false;
   document.querySelectorAll(".album-add").forEach(b=>b.hidden=false);
@@ -2052,3 +2081,6 @@ refreshAccount();
 
 paintRepeat(); paintVol(); paintReact(); paintShuffle(); renderQueue();
 load();
+
+// Approval notices are lightweight, session-specific and never cached.
+setInterval(()=>{if(document.visibilityState==='visible'&&currentAccount?.role==='user')refreshAccount();},30000);

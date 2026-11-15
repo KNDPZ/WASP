@@ -25,6 +25,7 @@ function showPane() {
   const k = has(PANES, section) ? section : "collection";
   $("#anav").innerHTML = Object.entries(PANES).filter(([id])=>id!=="docs").map(([id, label]) =>
     `<a class="nav-item${id === "danger" ? " dng" : ""}" href="#${id}"${id === k ? ' aria-current="page"' : ""}>${label}</a>`).join("");
+  adminPublishNotificationBadge(pendingPublishCount);
   document.querySelectorAll(".pane").forEach((p) => p.classList.toggle("hidden", p.id !== "s-" + k));
   if (k === "duplicates") loadDuplicates();
   if (k === "users") loadUsers();
@@ -32,20 +33,103 @@ function showPane() {
   if (k === "docs") loadDocs();
   if (k === "requests") showRequestTab(route === "requests/spotify");
   if (k === "network") showNetworkTab(route === "network/crons");
+  pollAdminPublishRequests();
   window.scrollTo(0, 0);
 }
 window.addEventListener("hashchange", showPane);
-async function loadUsers(){
-  const el = $("#usersList");
-  if (!el || $("#panel").classList.contains("hidden")) return;
-  el.textContent = "Checking registered users and online links…";
-  try {
-    const r = await fetch("/api/admin/users", {cache:"no-store"});
-    if (!r.ok) throw Error(`HTTP ${r.status}`);
-    const users = await r.json();
-    el.innerHTML = users.length ? `<div class="table-scroll"><table><thead><tr><th>Username</th><th>Hearted songs</th><th>Liked songs</th><th>Private playlists</th><th>Published playlists</th><th>Provided links</th><th>Online links</th><th>Can publish</th><th>Actions</th></tr></thead><tbody>${users.map(u=>`<tr data-user-id="${esc(u.id)}"><td><b>${esc(u.username)}</b></td><td>${Number(u.heart_songs)||0}</td><td>${Number(u.like_songs)||0}</td><td>${Number(u.private_playlists)||0}</td><td>${Number(u.public_playlists)||0}</td><td>${Number(u.provided_links)||0}</td><td>${Number(u.online_links)||0}</td><td><label class="check"><input type="checkbox" data-user-publish="${esc(u.id)}" ${u.can_publish?'checked':''} aria-label="Allow ${esc(u.username)} to publish WASP links"> Allow</label></td><td><button class="btn danger" type="button" data-delete-user="${esc(u.id)}" data-delete-name="${esc(u.username)}">Delete user</button></td></tr>`).join("")}</tbody></table></div>` : `<p class="muted">No registered users yet.</p>`;
-  } catch(e) { el.textContent = "Unable to load users: "+e.message; }
+// Community publishing: global default, per-account exceptions, searchable/sortable statistics.
+let registeredUsers = [], usersSortKey = '', usersSortDescending = false, pendingPublishCount=0;
+const USER_COLUMNS = [
+  ['username','Username','text'],['heart_songs','Heart songs','number'],
+  ['like_songs','Like songs','number'],['dislike_songs','Dislike songs','number'],
+  ['private_playlists','Private playlists','number'],['public_playlists','Published playlists','number'],
+  ['provided_links','Provided links','number'],['online_links','Online links','number'],
+  ['created_at','Registered date','date'],['can_publish','Can publish','number'],
+];
+function adminPublishNotificationBadge(count){
+  pendingPublishCount=Math.max(0,Number(count)||0);
+  const nav=document.querySelector('#anav a[href="#users"]');
+  if(!nav)return;
+  nav.classList.add('nav-has-notices');
+  let badge=nav.querySelector('.publish-request-count');
+  if(!badge){badge=document.createElement('span');badge.className='publish-request-count';nav.appendChild(badge);}
+  badge.textContent=pendingPublishCount>99?'99+':String(pendingPublishCount);
+  badge.hidden=pendingPublishCount===0;
+  nav.setAttribute('aria-label',pendingPublishCount?`Users · ${pendingPublishCount} pending publish request${pendingPublishCount===1?'':'s'}`:'Users');
 }
+async function pollAdminPublishRequests(){
+  if($('#panel').classList.contains('hidden'))return;
+  try{const r=await fetch('/api/admin/users/publish-notifications',{cache:'no-store'});if(!r.ok)return;
+    const data=await r.json();const before=pendingPublishCount;
+    adminPublishNotificationBadge(data.pending);
+    if(before!==pendingPublishCount && location.hash.split('/')[0]==='#users')await loadUsers();
+  }catch{}
+}
+function renderUsersTable(){
+  const el=$('#usersList');
+  const search=$('#usersSearch').value.trim().toLocaleLowerCase();
+  let rows=registeredUsers.filter(u=>String(u.username||'').toLocaleLowerCase().includes(search));
+  if(usersSortKey){
+    const column=USER_COLUMNS.find(c=>c[0]===usersSortKey);
+    rows=[...rows].sort((a,b)=>{
+      const av=a[usersSortKey],bv=b[usersSortKey];let difference;
+      if(column?.[2]==='text')difference=String(av||'').localeCompare(String(bv||''),undefined,{sensitivity:'base',numeric:true});
+      else difference=(Number(av)||0)-(Number(bv)||0);
+      if(!difference)difference=String(a.username||'').localeCompare(String(b.username||''),undefined,{sensitivity:'base'});
+      return usersSortDescending?-difference:difference;
+    });
+  }
+  const heading=USER_COLUMNS.map(([key,title])=>{
+    const active=usersSortKey===key;
+    return `<th scope="col" aria-sort="${active?(usersSortDescending?'descending':'ascending'):'none'}"><button type="button" class="users-sort" data-sort="${key}" aria-label="Sort by ${title}">${title}<span class="users-sort-indicator" aria-hidden="true">${active?(usersSortDescending?' ▼':' ▲'):' ↕'}</span></button></th>`;
+  }).join('')+'<th scope="col">Actions</th>';
+  const content=rows.map(u=>{
+    const date=Number(u.created_at)?new Date(Number(u.created_at)).toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'}):'—';
+    const requested=!!u.publish_requested;
+    const cell=USER_COLUMNS.map(([key])=>{
+      if(key==='username')return `<td><span class="users-name">${requested?'<span class="publish-request-dot" aria-label="Publishing permission requested" title="Request to publish pending"></span>':''}<b>${esc(u.username)}</b></span></td>`;
+      if(key==='can_publish')return `<td><label class="check"><input type="checkbox" data-user-publish="${esc(u.id)}" ${u.can_publish?'checked':''} aria-label="Allow ${esc(u.username)} to publish WASP links"> Allow</label></td>`;
+      if(key==='created_at')return `<td><time datetime="${Number(u.created_at)?new Date(Number(u.created_at)).toISOString():''}">${esc(date)}</time></td>`;
+      return `<td>${Number(u[key])||0}</td>`;
+    }).join('');
+    return `<tr data-user-id="${esc(u.id)}">${cell}<td><button class="btn danger" type="button" data-delete-user="${esc(u.id)}" data-delete-name="${esc(u.username)}">Delete user</button></td></tr>`;
+  }).join('');
+  el.innerHTML=registeredUsers.length?`<div class="table-scroll"><table><thead><tr>${heading}</tr></thead><tbody>${content||`<tr><td colspan="11" class="muted">No usernames match the search.</td></tr>`}</tbody></table></div>`:'<p class="muted">No registered users yet.</p>';
+}
+async function loadUsers(){
+  const el=$('#usersList');
+  if(!el || $('#panel').classList.contains('hidden'))return;
+  el.textContent='Checking registered users and online links…';
+  try{
+    const [userRes,defaultRes]=await Promise.all([
+      fetch('/api/admin/users',{cache:'no-store'}),
+      fetch('/api/admin/users/publish-default',{cache:'no-store'}),
+    ]);
+    if(!userRes.ok||!defaultRes.ok)throw Error('Unable to load publishing permissions');
+    registeredUsers=await userRes.json();
+    $('#publishAllUsers').checked=!!(await defaultRes.json()).enabled;
+    renderUsersTable();
+    adminPublishNotificationBadge(registeredUsers.filter(u=>u.publish_requested).length);
+  }catch(e){el.textContent='Unable to load users: '+e.message;}
+}
+$('#usersSearch').addEventListener('input',renderUsersTable);
+$('#publishAllUsers').addEventListener('change',async e=>{
+  const checkbox=e.currentTarget;checkbox.disabled=true;
+  try{
+    const r=await post('/api/admin/users/publish-default',{enabled:checkbox.checked},'PUT');
+    const data=await r.json();if(!r.ok)throw Error(data.error||'Unable to update global publishing');
+    $('#usersMsg').textContent=checkbox.checked?'Publishing enabled by default for all accounts.':'Publishing disabled by default; individual permissions are retained.';
+    await loadUsers();
+  }catch(err){checkbox.checked=!checkbox.checked;$('#usersMsg').textContent=err.message;}
+  finally{checkbox.disabled=false;}
+});
+$('#usersList').addEventListener('click',e=>{
+  const sort=e.target.closest('[data-sort]');if(!sort)return;
+  const key=sort.dataset.sort;
+  if(!USER_COLUMNS.some(c=>c[0]===key))return;
+  usersSortDescending=usersSortKey===key?!usersSortDescending:false;
+  usersSortKey=key;renderUsersTable();
+});
 $("#usersList").addEventListener("change",async e=>{
   const t=e.target.closest("[data-user-publish]");if(!t)return;
   t.disabled=true;
@@ -53,6 +137,7 @@ $("#usersList").addEventListener("change",async e=>{
     const r=await post(`/api/admin/users/${encodeURIComponent(t.dataset.userPublish)}/publish`,{enabled:t.checked},"PUT");
     const j=await r.json();if(!r.ok)throw Error(j.error||"Could not save permission");
     $("#usersMsg").textContent="Publishing permission updated.";
+    await loadUsers();
   }catch(err){t.checked=!t.checked;$("#usersMsg").textContent=err.message;}
   t.disabled=false;
 });
@@ -1084,3 +1169,6 @@ $('#duplicateList').onclick=async e=>{
   if(r.ok){await loadDuplicates();refresh();}
 };
 setInterval(()=>{if(location.hash.startsWith('#duplicates'))loadDuplicates();},12000);
+
+// Low-frequency polling for outstanding publishing requests; no user addresses are exposed.
+setInterval(pollAdminPublishRequests,30000);

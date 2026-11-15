@@ -4,8 +4,8 @@ import {extractEmbeddedArt, MAX_ID3_ART_READ, MAX_EMBEDDED_IMAGE} from "./embedd
 // Storage: R2 (mp3 files + artwork, binding MUSIC) and D1 (library, playlists, reactions, admin hash, sessions, binding DB).
 
 // Salted PBKDF2 hash of the first-time admin password. Change it from the admin page after first login.
-const BUILD_VERSION = "15.0.5";
-const BUILD_LABEL = "Federated Library · Account & Community Publishing";
+const BUILD_VERSION = "15.0.6";
+const BUILD_LABEL = "Federated Library · Publishing Permissions & Notifications";
 const DEFAULT_SALT = "9756e918a7545f9eec461ee48491018a";
 const DEFAULT_HASH = "539db4ea2054366abc97375b551b16c115622e1a89b8f9cf75cea28345c6ba26";
 
@@ -48,7 +48,7 @@ const PUBLIC_CACHE_TTLS = Object.freeze({
   "/api/track-reaction-counts": 5,
   "/api/recent-listens": 10,
 });
-const CACHE_REV = "wasp-v15-0-5";
+const CACHE_REV = "wasp-v15-0-6";
 const publicRevision = url => /^[a-f0-9-]{1,40}$/i.test(url.searchParams.get("v") || "") ? url.searchParams.get("v") : "";
 const cacheFor = (req, url) => req.method === "GET" && (!url.search || (url.searchParams.size===1 && !!publicRevision(url))) && PUBLIC_CACHE_TTLS[url.pathname]
   ? (typeof caches !== "undefined" && caches.default ? caches.default : null) : null;
@@ -119,10 +119,37 @@ const COMMUNITY_SCHEMA = [
   "CREATE TABLE IF NOT EXISTS user_published_peers (id TEXT PRIMARY KEY,user_id TEXT NOT NULL,url TEXT NOT NULL,name TEXT NOT NULL DEFAULT '',track_count INTEGER NOT NULL DEFAULT 0,last_ok INTEGER,last_error TEXT,last_checked INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL,UNIQUE(user_id,url))",
   "CREATE INDEX IF NOT EXISTS idx_user_peers_owner ON user_published_peers(user_id)",
   "CREATE TABLE IF NOT EXISTS user_voter_tokens (user_id TEXT NOT NULL,voter TEXT NOT NULL,PRIMARY KEY(user_id,voter))",
+  "CREATE TABLE IF NOT EXISTS user_publish_requests (user_id TEXT PRIMARY KEY, requested_at INTEGER NOT NULL)",
+  "CREATE TABLE IF NOT EXISTS user_publish_approval_notices (user_id TEXT PRIMARY KEY, approved_at INTEGER NOT NULL, viewed_at INTEGER NOT NULL DEFAULT 0)",
 ];
 async function upgradeCommunitySchema(DB) {
   for (const sql of COMMUNITY_SCHEMA) await DB.prepare(sql).run();
-  await DB.prepare("INSERT INTO settings(key,value) VALUES('wasp_schema_version','15.2') ON CONFLICT(key) DO UPDATE SET value='15.2'").run();
+  await DB.prepare("INSERT INTO settings(key,value) VALUES('wasp_schema_version','15.3') ON CONFLICT(key) DO UPDATE SET value='15.3'").run();
+}
+// Explicit per-user overrides win over the global default. A missing row means
+// "inherit global" so newly registered accounts receive the current default.
+const PUBLISH_DEFAULT_SQL = "COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key='user_publish_default'),0)";
+const EFFECTIVE_PUBLISH_SQL = `COALESCE(p.enabled,${PUBLISH_DEFAULT_SQL})`;
+async function globalPublishDefault(DB) {
+  return Number((await DB.prepare("SELECT value FROM settings WHERE key='user_publish_default'").first())?.value||0)===1;
+}
+async function userMayPublish(DB,userId) {
+  const row=await DB.prepare(`SELECT COALESCE((SELECT enabled FROM user_peer_permissions WHERE user_id=?),${PUBLISH_DEFAULT_SQL}) AS enabled`).bind(userId).first();
+  return !!row?.enabled;
+}
+async function createPublishApprovalNotice(DB,userId) {
+  await DB.prepare(`INSERT INTO user_publish_approval_notices(user_id,approved_at,viewed_at) VALUES(?,?,0)
+    ON CONFLICT(user_id) DO UPDATE SET approved_at=excluded.approved_at,viewed_at=0`).bind(userId,Date.now()).run();
+}
+async function approvePublishRequest(DB,userId) {
+  const pending=await DB.prepare('SELECT user_id FROM user_publish_requests WHERE user_id=?').bind(userId).first();
+  if(!pending)return false;
+  await DB.batch([
+    DB.prepare('DELETE FROM user_publish_requests WHERE user_id=?').bind(userId),
+    DB.prepare(`INSERT INTO user_publish_approval_notices(user_id,approved_at,viewed_at) VALUES(?,?,0)
+      ON CONFLICT(user_id) DO UPDATE SET approved_at=excluded.approved_at,viewed_at=0`).bind(userId,Date.now()),
+  ]);
+  return true;
 }
 // User-contributed URLs must not reach Tailscale, localhost, cloud metadata, or
 // Docker's internal services. Administrator-managed peers retain their own policy.
@@ -202,7 +229,7 @@ async function probeCommunityPeer(origin) {
 }
 async function refreshCommunityHealth(DB,limit=60) {
   const entries=(await DB.prepare(`SELECT l.id,l.url FROM user_published_peers l
-    JOIN user_peer_permissions p ON p.user_id=l.user_id AND p.enabled=1
+    LEFT JOIN user_peer_permissions p ON p.user_id=l.user_id WHERE ${EFFECTIVE_PUBLISH_SQL}=1
     ORDER BY l.last_checked ASC LIMIT ?`).bind(limit).all()).results;
   // Limit concurrent network fetches to avoid overwhelming the Worker and D1.
   for(let i=0;i<entries.length;i+=5) await Promise.all(entries.slice(i,i+5).map(async entry=>{
@@ -216,8 +243,8 @@ async function refreshCommunityHealth(DB,limit=60) {
 }
 async function knownPeer(DB,origin) {
   return !!((await DB.prepare('SELECT 1 FROM peers WHERE url=?').bind(origin).first()) ||
-    (await DB.prepare(`SELECT 1 FROM user_published_peers l JOIN user_peer_permissions p
-      ON p.user_id=l.user_id AND p.enabled=1 WHERE l.url=? AND l.last_error IS NULL AND l.last_ok IS NOT NULL LIMIT 1`).bind(origin).first()));
+    (await DB.prepare(`SELECT 1 FROM user_published_peers l LEFT JOIN user_peer_permissions p
+      ON p.user_id=l.user_id WHERE ${EFFECTIVE_PUBLISH_SQL}=1 AND l.url=? AND l.last_error IS NULL AND l.last_ok IS NOT NULL LIMIT 1`).bind(origin).first()));
 }
 async function recordSignedInVoter(DB,info,voter) {
   if(info?.role==='user'&&info.user_id)
@@ -255,7 +282,8 @@ function init(env) {
       await upgradeCommunitySchema(env.DB);
       return;
     }
-    if(marker?.value === "15.2")return;
+    if(marker?.value === "15.3")return;
+    if(marker?.value === "15.2") {await upgradeCommunitySchema(env.DB);return;}
     if(marker?.value === "15.1") {await upgradeCommunitySchema(env.DB);return;}
     // Multiple Cloudflare isolates may start together across data centers.
     // A D1-backed lease prevents simultaneous backfills and repeated index
@@ -271,7 +299,7 @@ function init(env) {
         for(let attempt=0;attempt<20;attempt++) {
           await new Promise(resolve=>setTimeout(resolve,500));
           const marker=await q("SELECT value FROM settings WHERE key = 'wasp_schema_version'").first();
-          if(marker?.value === "15.2") return;
+          if(marker?.value === "15.3") return;
         }
         throw new Error("A WASP database migration is still running. Please retry shortly.");
       }
@@ -280,7 +308,7 @@ function init(env) {
     // Another isolate may have completed the migration after our first check
     // but before this isolate acquired the released lease.
     const afterLease=await q("SELECT value FROM settings WHERE key = 'wasp_schema_version'").first();
-    if(afterLease?.value === "15.2") return;
+    if(afterLease?.value === "15.3") return;
     // Run each statement on its own. D1 batch() is atomic: one failure rolls the whole
     // batch back, so a hiccup on a new table/index during an upgrade used to take the
     // entire site down. Individual try/catch keeps the site up even if one step fails.
@@ -1439,8 +1467,8 @@ async function api(req, env, url, ctx) {
   if (path === "/api/network/peers" && m === "GET") {
     const rows = (await DB.prepare("SELECT id, url, name, track_count, last_ok, last_error FROM peers ORDER BY added_at").all()).results;
     const published=(await DB.prepare(`SELECT l.url,l.name,l.track_count,l.last_ok FROM user_published_peers l
-      JOIN user_peer_permissions p ON p.user_id=l.user_id AND p.enabled=1
-      WHERE l.last_error IS NULL AND l.last_ok IS NOT NULL ORDER BY l.created_at`).all()).results;
+      LEFT JOIN user_peer_permissions p ON p.user_id=l.user_id
+      WHERE ${EFFECTIVE_PUBLISH_SQL}=1 AND l.last_error IS NULL AND l.last_ok IS NOT NULL ORDER BY l.created_at`).all()).results;
     const known=new Set(rows.map(r=>r.url));
     for(const p of published)if(!known.has(p.url)){
       rows.push({id:'community-'+await sha256(p.url),url:p.url,name:p.name||'WASP',track_count:p.track_count,last_ok:p.last_ok,last_error:null,community:true});
@@ -1943,7 +1971,8 @@ async function api(req, env, url, ctx) {
       return json({ authenticated: true, admin: true, role: "admin", username });
     }
     const u = await DB.prepare("SELECT username FROM user_accounts WHERE id = ?").bind(info.user_id).first();
-    return json({ authenticated: !!u, admin: false, role: "user", username: u?.username || "" });
+    const notice=await DB.prepare('SELECT 1 FROM user_publish_approval_notices WHERE user_id=? AND viewed_at=0').bind(info.user_id).first();
+    return json({ authenticated: !!u, admin: false, role: "user", username: u?.username || "", publish_notice:!!notice });
   }
 
   const auth = await sessionInfo(req, env);
@@ -1962,13 +1991,23 @@ async function api(req, env, url, ctx) {
       catch {return json({error:'Username is already in use.'},409);}
       await touchCatalogue(DB);return json({ok:true,username});
     }
+    if(path==="/api/user/publish/request" && m==="POST") {
+      if(await userMayPublish(DB,auth.user_id))return json({error:'Publishing is already enabled for your account.'},409);
+      const row=await DB.prepare('SELECT 1 FROM user_publish_requests WHERE user_id=?').bind(auth.user_id).first();
+      if(row)return json({ok:true,pending:true,already_requested:true});
+      await DB.prepare('INSERT INTO user_publish_requests(user_id,requested_at) VALUES(?,?)').bind(auth.user_id,Date.now()).run();
+      return json({ok:true,pending:true},201);
+    }
     if(path==="/api/user/publish" && m==="GET") {
-      const allowed=!!(await DB.prepare('SELECT enabled FROM user_peer_permissions WHERE user_id=?').bind(auth.user_id).first())?.enabled;
+      const allowed=await userMayPublish(DB,auth.user_id);
       const links=(await DB.prepare('SELECT id,url,name,track_count,last_ok,last_error,last_checked FROM user_published_peers WHERE user_id=? ORDER BY created_at DESC').bind(auth.user_id).all()).results;
-      return json({enabled:allowed,links:links.map(l=>({...l,online:!!l.last_ok&&!l.last_error}))});
+      const request=await DB.prepare('SELECT requested_at FROM user_publish_requests WHERE user_id=?').bind(auth.user_id).first();
+      const notice=await DB.prepare('SELECT approved_at FROM user_publish_approval_notices WHERE user_id=? AND viewed_at=0').bind(auth.user_id).first();
+      if(notice)await DB.prepare('UPDATE user_publish_approval_notices SET viewed_at=? WHERE user_id=? AND viewed_at=0').bind(Date.now(),auth.user_id).run();
+      return json({enabled:allowed,request_pending:!!request,approval_seen:!!notice,links:links.map(l=>({...l,online:!!l.last_ok&&!l.last_error}))});
     }
     if(path==="/api/user/publish" && m==="POST") {
-      const allowed=(await DB.prepare('SELECT enabled FROM user_peer_permissions WHERE user_id=?').bind(auth.user_id).first())?.enabled;
+      const allowed=await userMayPublish(DB,auth.user_id);
       if(!allowed)return json({error:'An administrator must enable publishing for your account.'},403);
       const count=(await DB.prepare('SELECT COUNT(*) AS n FROM user_published_peers WHERE user_id=?').bind(auth.user_id).first()).n;
       if(count>=8)return json({error:'Maximum 8 links per account.'},429);
@@ -2116,16 +2155,38 @@ async function api(req, env, url, ctx) {
   }
 
 
+  if(path==="/api/admin/users/publish-default" && m==="GET")
+    return json({enabled:await globalPublishDefault(DB)});
+  if(path==="/api/admin/users/publish-default" && m==="PUT") {
+    const b=await req.json().catch(()=>({}));
+    if(typeof b.enabled!=='boolean')return json({error:'Invalid publishing default.'},400);
+    await DB.prepare(`INSERT INTO settings(key,value) VALUES('user_publish_default',?)
+      ON CONFLICT(key) DO UPDATE SET value=excluded.value`).bind(b.enabled?'1':'0').run();
+    // Approve only requests whose effective permission is now enabled. Per-user
+    // explicit denials continue to override the global checkbox.
+    if(b.enabled){
+      const pending=(await DB.prepare('SELECT user_id FROM user_publish_requests').all()).results;
+      for(const item of pending)if(await userMayPublish(DB,item.user_id))await approvePublishRequest(DB,item.user_id);
+    }
+    await touchCatalogue(DB);
+    return json({ok:true,enabled:b.enabled});
+  }
+  if(path==="/api/admin/users/publish-notifications" && m==="GET") {
+    const {n}=await DB.prepare('SELECT COUNT(*) AS n FROM user_publish_requests').first();
+    return json({pending:Number(n)||0});
+  }
   // Admin users may count healthy community peers, but never receive their URLs.
   if (path === "/api/admin/users" && m === "GET") {
     await refreshCommunityHealth(DB,8);
     const { results } = await DB.prepare(`
       SELECT u.id, u.username, u.created_at,
-        COALESCE((SELECT enabled FROM user_peer_permissions x WHERE x.user_id=u.id),0) AS can_publish,
+        COALESCE((SELECT enabled FROM user_peer_permissions x WHERE x.user_id=u.id),${PUBLISH_DEFAULT_SQL}) AS can_publish,
+        (SELECT 1 FROM user_publish_requests pr WHERE pr.user_id=u.id) AS publish_requested,
         (SELECT COUNT(*) FROM user_published_peers l WHERE l.user_id=u.id) AS provided_links,
-        (SELECT COUNT(*) FROM user_published_peers l WHERE l.user_id=u.id AND l.last_ok IS NOT NULL AND l.last_error IS NULL AND EXISTS (SELECT 1 FROM user_peer_permissions p WHERE p.user_id=u.id AND p.enabled=1)) AS online_links,
+        (SELECT COUNT(*) FROM user_published_peers l WHERE l.user_id=u.id AND l.last_ok IS NOT NULL AND l.last_error IS NULL AND COALESCE((SELECT enabled FROM user_peer_permissions p WHERE p.user_id=u.id),${PUBLISH_DEFAULT_SQL})=1) AS online_links,
         (SELECT COUNT(*) FROM user_song_reactions r WHERE r.user_id=u.id AND r.kind='heart') AS heart_songs,
         (SELECT COUNT(*) FROM user_song_reactions r WHERE r.user_id=u.id AND r.kind='like') AS like_songs,
+        (SELECT COUNT(*) FROM user_song_reactions r WHERE r.user_id=u.id AND r.kind='dislike') AS dislike_songs,
         (SELECT COUNT(*) FROM user_playlists p WHERE p.user_id=u.id AND p.is_public=0) AS private_playlists,
         (SELECT COUNT(*) FROM user_playlists p WHERE p.user_id=u.id AND p.is_public=1) AS public_playlists
       FROM user_accounts u ORDER BY u.created_at DESC, u.username COLLATE NOCASE`).all();
@@ -2136,8 +2197,13 @@ async function api(req, env, url, ctx) {
     if(!user)return json({error:'User not found.'},404);
     const b=await req.json().catch(()=>({}));
     if(typeof b.enabled!=='boolean')return json({error:'Invalid permission.'},400);
+    const previouslyAllowed=await userMayPublish(DB,user.id);
     await DB.prepare(`INSERT INTO user_peer_permissions(user_id,enabled) VALUES(?,?)
       ON CONFLICT(user_id) DO UPDATE SET enabled=excluded.enabled`).bind(user.id,b.enabled?1:0).run();
+    if(b.enabled){
+      const fromRequest=await approvePublishRequest(DB,user.id);
+      if(!fromRequest&&!previouslyAllowed)await createPublishApprovalNotice(DB,user.id);
+    }
     await touchCatalogue(DB);return json({ok:true,enabled:b.enabled});
   }
   if((x=path.match(/^\/api\/admin\/users\/([\w-]+)$/))&&m==='DELETE') {
@@ -2169,6 +2235,8 @@ async function api(req, env, url, ctx) {
       DB.prepare('DELETE FROM user_voter_tokens WHERE user_id=?').bind(user.id),
       DB.prepare('DELETE FROM user_published_peers WHERE user_id=?').bind(user.id),
       DB.prepare('DELETE FROM user_peer_permissions WHERE user_id=?').bind(user.id),
+      DB.prepare('DELETE FROM user_publish_requests WHERE user_id=?').bind(user.id),
+      DB.prepare('DELETE FROM user_publish_approval_notices WHERE user_id=?').bind(user.id),
       DB.prepare('DELETE FROM sessions WHERE user_id=?').bind(user.id),
       DB.prepare('DELETE FROM user_accounts WHERE id=?').bind(user.id),
     ]);

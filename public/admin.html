@@ -6,7 +6,7 @@
 <meta name="robots" content="noindex">
 <title>Admin · WASP</title>
 <link rel="icon" id="favicon" href="/wasp-icon.png">
-<link rel="stylesheet" href="/style.css?v=15.0.5">
+<link rel="stylesheet" href="/style.css?v=15.0.6">
 </head>
 <body style="--ph:0px;padding-bottom:0">
 
@@ -221,7 +221,7 @@
       <div class="card" style="max-width:520px">
         <p class="muted" style="margin-top:0">Signed in as <b id="adminAccountName">admin</b></p>
         <form id="adminNameForm" class="form account-name-form">
-          <label>Change administrator username<input id="adminNewName" name="username" minlength="3" maxlength="32" pattern="[A-Za-z0-9_-]{3,32}" required autocomplete="off"></label>
+          <label>Change administrator username<input id="adminNewName" type="text" name="username" minlength="3" maxlength="32" pattern="[A-Za-z0-9_-]{3,32}" required autocomplete="off"></label>
           <label>Current admin password<input id="adminNamePassword" type="password" name="password" autocomplete="current-password" required></label>
           <button class="btn" type="submit">Save username</button>
         </form>
@@ -319,6 +319,10 @@
       <div class="card users-summary">
         <h2>Registered accounts</h2>
         <p class="muted">Grant publishing permission per account (off by default). Submitted link addresses are not shown here—only counts and how many are online. Existing anonymous activity cannot always be attributed retroactively.</p>
+        <label class="check publish-global-label"><input type="checkbox" id="publishAllUsers" aria-label="Allow all users to publish WASP links"> Allow all registered users, including new accounts, to publish</label>
+        <p class="muted publish-global-note">Off by default. Individual user permissions override this setting; uncheck a user below to block that account.</p>
+        <label class="muted" for="usersSearch">Search username</label>
+        <input id="usersSearch" type="search" placeholder="Search registered users…" autocomplete="off" aria-label="Search usernames">
         <p id="usersMsg" class="msg" role="status"></p>
         <div id="usersList" aria-live="polite">Open this page to load users.</div>
       </div>
@@ -363,6 +367,6 @@
     <div class="form" style="justify-content:flex-end"><button class="btn ghost" type="button" id="cCancel">Cancel</button><button class="btn danger solid" id="cGo" type="submit" disabled>Delete everything</button></div>
   </form>
 </dialog>
-<script type="module" src="/admin.js?v=15.0.5"></script>
+<script type="module" src="/admin.js?v=15.0.6"></script>
 </body>
 </html>
