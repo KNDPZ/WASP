@@ -57,7 +57,7 @@ with sync_playwright() as pw:
  assert page.evaluate('document.querySelector("#list")===window.__listBefore && document.querySelector(".recent-listen-meta")===window.__tileBefore')
  assert page.evaluate('[window.__pauseCalls,window.__loadCalls]')==[0,0]
  assert abs(page.evaluate("window.scrollY")-prior_scroll)<2
- assert page.locator('#accountSettingsDialog [data-settings-tab]').count()==2
+ assert page.locator('#accountSettingsDialog [data-settings-tab]').count()==3
  assert page.locator('#accountSettingsDialog [data-settings-tab="request"]').count()==0
  assert page.locator('#accountSettingsDialog #accountSettingsContent #request').count()==0
  # account username change uses prior API, maintains popup

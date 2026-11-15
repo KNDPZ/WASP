@@ -1,11 +1,13 @@
 import {RELEASE_DOCS} from "./release-docs.js";
+import {handleMobileRest, manageMobileBridge, ensureMobileSchema} from "./mobile-bridge.js";
+import {syncFederatedFromGateway, ensureFederationSchema} from "./mobile-federation.js";
 import {extractEmbeddedArt, MAX_ID3_ART_READ, MAX_EMBEDDED_IMAGE} from "./embedded-art.js";
 // Music app Worker: public listening + admin management.
 // Storage: R2 (mp3 files + artwork, binding MUSIC) and D1 (library, playlists, reactions, admin hash, sessions, binding DB).
 
 // Salted PBKDF2 hash of the first-time admin password. Change it from the admin page after first login.
-const BUILD_VERSION = "15.0.9";
-const BUILD_LABEL = "Currently Streaming · Live Listening";
+const BUILD_VERSION = "16.0.2";
+const BUILD_LABEL = "Mobile Federation · OpenSubsonic Staging";
 const DEFAULT_SALT = "9756e918a7545f9eec461ee48491018a";
 const DEFAULT_HASH = "539db4ea2054366abc97375b551b16c115622e1a89b8f9cf75cea28345c6ba26";
 
@@ -1374,6 +1376,11 @@ async function syncPeerAll(env,peer){
     const result=await syncPeerPhase(env,peer,phase);counts[phase]=result.count;
   }
   counts.revision=await snapshotPeerRevision(env,peer);
+  // Optional one-hop Mobile Bridge federation. Native WASP peer sync must
+  // succeed regardless of a remote second-hop source being unavailable.
+  if((await env.DB.prepare("SELECT value FROM settings WHERE key='mobile_bridge_enabled'").first())?.value==='1'){
+    try{counts.federation=await syncFederatedFromGateway(env,peer);}catch(e){counts.federation={sources:0,errors:[e.message]};}
+  }
   await touchCatalogue(env.DB);
   return counts;
 }
@@ -2058,6 +2065,8 @@ async function api(req, env, url, ctx) {
     // Authenticated user operations; admin credentials are handled separately.
 
     if (!auth || auth.role !== "user") return json({ error: "User login required." }, 401);
+    if (path === "/api/user/mobile-keys" || /^\/api\/user\/mobile-keys\/[\w-]+$/.test(path))
+      return manageMobileBridge(req,env,"user",auth.user_id);
     if(path==="/api/user/username" && m==="PUT") {
       const b=await req.json().catch(()=>({})), username=clean(b.username,32);
       if(!/^[a-zA-Z0-9_-]{3,32}$/.test(username))return json({error:'Username must be 3–32 characters: letters, numbers, _ or -.'},400);
@@ -2215,6 +2224,7 @@ async function api(req, env, url, ctx) {
   // ---------- admin only ----------
   const sid = auth?.token;
   if (!sid || auth.role !== "admin") return json({ error: "Admin access required." }, 403);
+  if(path==="/api/admin/mobile-bridge" || path==="/api/admin/mobile-bridge/secret") return manageMobileBridge(req,env,"admin",null);
   if(path==="/api/admin/version" && m==="GET") return json({version:BUILD_VERSION,label:BUILD_LABEL},200,{"cache-control":"no-store"});
   if(path==="/api/admin/docs" && m==="GET") {
     const name=url.searchParams.get("name");
@@ -2292,6 +2302,7 @@ async function api(req, env, url, ctx) {
     const user=await DB.prepare('SELECT id FROM user_accounts WHERE id=?').bind(x[1]).first();
     if(!user)return json({error:'User not found.'},404);
     const images=(await DB.prepare('SELECT id FROM user_playlists WHERE user_id=?').bind(user.id).all()).results;
+    await ensureMobileSchema(DB); // Revoke any app credentials atomically with account deletion.
     // Atomic D1 removal of user-owned data. Music files and other users' playlists are retained.
     await DB.batch([
       DB.prepare(`DELETE FROM user_playlist_tracks WHERE playlist_id IN (SELECT id FROM user_playlists WHERE user_id=?)`).bind(user.id),
@@ -2316,6 +2327,7 @@ async function api(req, env, url, ctx) {
       DB.prepare('DELETE FROM user_publish_requests WHERE user_id=?').bind(user.id),
       DB.prepare('DELETE FROM user_publish_approval_notices WHERE user_id=?').bind(user.id),
       DB.prepare('DELETE FROM sessions WHERE user_id=?').bind(user.id),
+      DB.prepare('DELETE FROM mobile_bridge_keys WHERE user_id=?').bind(user.id),
       DB.prepare('DELETE FROM user_accounts WHERE id=?').bind(user.id),
     ]);
     await Promise.all(images.map(p=>env.MUSIC.delete('art/user-playlist/'+p.id).catch(()=>{})));
@@ -2787,6 +2799,9 @@ async function api(req, env, url, ctx) {
     return json({ id, url: raw, name: peerInfo.name || raw, track_count: peerInfo.tracks || 0, online: true, last_ok: now }, 201);
   }
   if ((x = path.match(/^\/api\/admin\/network\/peers\/([\w-]+)$/)) && m === "DELETE") {
+    await ensureFederationSchema(DB);
+    await DB.prepare("DELETE FROM mobile_federation_chunks WHERE gateway_id=?").bind(x[1]).run();
+    await DB.prepare("DELETE FROM mobile_federation_sources WHERE gateway_id=?").bind(x[1]).run();
     await DB.prepare("DELETE FROM peer_catalogue_chunks WHERE peer_id = ?").bind(x[1]).run();
     await DB.prepare("DELETE FROM peer_catalogue_cache WHERE peer_id = ?").bind(x[1]).run();
     await DB.prepare("DELETE FROM peers WHERE id = ?").bind(x[1]).run();
@@ -2801,8 +2816,11 @@ async function api(req, env, url, ctx) {
     try {
       if(body.phase==="finish"){
         await snapshotPeerRevision(env,peer);
+        const federation=(await DB.prepare("SELECT value FROM settings WHERE key='mobile_bridge_enabled'").first())?.value==='1'
+          ?await syncFederatedFromGateway(env,peer).catch(e=>({sources:0,tracks:0,playlists:0,errors:[e.message]}))
+          :null;
         await touchCatalogue(DB);
-        return json({ok:true,phase:"finish",revision:await catalogueVersion(DB)});
+        return json({ok:true,phase:"finish",revision:await catalogueVersion(DB),federation});
       }
       const result=await syncPeerPhase(env,peer,body.phase);
       return json({ok:true,...result});
@@ -2856,6 +2874,12 @@ export default {
       if (!env.DB || !env.MUSIC) {
         return json({ error: "This Worker has no D1 database (DB) or R2 bucket (MUSIC) bound. Enable R2 on the account, then check the Git build log and the Worker bindings." }, 503);
       }
+      // Isolated compatibility adapter: never interpret mobile URLs as native
+      // WASP routes. Its authentication and storage are independent.
+      if (url.pathname === '/mobile' || url.pathname === '/mobile/')
+        return env.ASSETS.fetch(new Request(new URL('/mobile.html',url),req));
+      if (/^\/(?:mobile\/)?rest\/[a-zA-Z][a-zA-Z0-9]*(?:\.view)?$/.test(url.pathname))
+        return await handleMobileRest(req,env,url);
       const share = await isSharing(env.DB);
       // Peer CORS preflight
       if (req.method === "OPTIONS" && share) {
