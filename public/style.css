@@ -641,3 +641,36 @@ body.sidebar-collapsed .nav-notice-dot.notice-compact{display:block;position:abs
 .settings-modal-loading{padding:24px}
 @media(max-width:600px){.account-settings-dialog{width:calc(100vw - 16px);max-width:calc(100vw - 16px);max-height:calc(100dvh - 16px);border-radius:15px}.account-settings-dialog #accountSettingsMount{max-height:calc(100dvh - 18px)}.settings-modal-head{padding:17px 18px 12px}.settings-modal-tabs{padding:12px 18px 10px}.settings-modal-body{padding:7px 18px 22px}.settings-modal-body .password-form{padding:14px}.settings-modal-description{font-size:12px}}
 @media(prefers-reduced-motion:reduce){.account-settings-dialog::backdrop{backdrop-filter:none}}
+
+
+/* WASP v15.0.9 — single-row active-stream preview + 30 newest live songs. */
+.listened-tabs{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:14px 0 16px}
+.listened-tabs a{display:inline-flex;align-items:center;justify-content:center;min-height:38px;padding:0 18px;
+ border:1px solid var(--line2);border-radius:999px;color:var(--text);text-decoration:none;font-size:13px;font-weight:700}
+.listened-tabs a[aria-current=page]{background:var(--accent);border-color:var(--accent);color:#151515}
+.live-preview,.live-full{padding:18px 20px;border-radius:16px;border:1px solid var(--line2);background:var(--panel)}
+.live-section-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+.live-section-heading h2{margin:0 0 5px;font-size:22px;line-height:1.2}
+.live-section-heading p{margin:0;font-size:12px}
+.live-stats{display:flex;align-items:center;gap:9px;margin-left:auto}
+.live-badge,.live-listeners{display:inline-flex;align-items:center;justify-content:center;border-radius:999px;font-weight:800;white-space:nowrap}
+.live-badge{min-height:26px;padding:0 12px;background:#075b28;color:#25f67b;font-size:12px}
+.live-listeners{min-height:28px;gap:7px;padding:0 12px;background:#d7192b;color:#fff;font-size:15px;font-variant-numeric:tabular-nums}
+.live-listeners svg{width:16px;height:16px;fill:none;stroke:#fff;stroke-width:2.3;stroke-linecap:round;stroke-linejoin:round}
+.live-preview-grid{display:grid;grid-template-columns:repeat(var(--live-cols),minmax(0,1fr));gap:12px;align-items:start}
+.live-preview .tile,.live-full .tile{padding:8px;min-width:0}
+.live-preview .tile .art,.live-full .tile .art{border-radius:9px}
+.live-preview .tile b,.live-full .tile b{margin-top:8px}
+.live-track-status{display:flex;align-items:center;gap:5px;margin-top:4px;color:#19df74;font-size:12px;font-weight:700}
+.live-track-status img{width:18px;height:18px;object-fit:contain;animation:wasp-live-pulse 1.7s ease-in-out infinite}
+.live-track .muted{font-size:12px}
+.live-more-tile{display:flex;align-items:center;flex-direction:column;justify-content:center;min-width:0;height:100%;padding:8px 3px;
+ gap:10px;text-align:center;color:var(--text);text-decoration:none;font-size:12px}
+.live-more-circle{display:grid;place-items:center;width:min(100%,140px);aspect-ratio:1;border-radius:50%;background:#383633;color:#b9b9b9;font-size:24px;letter-spacing:3px}
+.live-more-tile:hover .live-more-circle{background:#484641;color:#fff}
+.live-more-tile b{font-size:12px;line-height:1.3}
+.live-empty{padding:18px 0 6px;margin:0}
+.recent-list-divider{height:1px;background:var(--line2);margin:20px 0 18px}
+.live-all-grid{gap:14px 10px}
+@media(max-width:760px){.live-preview,.live-full{padding:12px}.live-section-heading h2{font-size:19px}.live-preview-grid{gap:6px}.live-preview .tile,.live-full .tile{padding:4px}}
+@media(prefers-reduced-motion:reduce){.live-track-status img{animation:none}}

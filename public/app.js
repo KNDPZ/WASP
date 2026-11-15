@@ -96,6 +96,10 @@ let peerSnapshots = new Map();
 let stalePeerSnapshots = new Set();
 let recentListens = [];
 let activeListeningKeys = new Set();
+let activeStreamTracks = [];
+let activeListenerCount = 0;
+let activeListenerCountPartial = false;
+const MAX_CURRENTLY_STREAMING = 30;
 let recentBusy=false;
 let view = { ids: [], label: "", pl: null }; // what the main area is showing (what a click on a row plays)
 let queue = [], qi = -1, qLabel = "", ctxPl = null; // what is playing, and the playlist it came from
@@ -822,22 +826,59 @@ function updateRelativeListenTimes(){
     el.setAttribute('aria-label','Last played '+el.textContent);
   });
 }
+function normalizeLiveStream(row,server){
+  if(!row?.track_id)return null;
+  const origin=registeredPeerOrigin(row.origin||server);
+  return {origin,track_id:String(row.track_id),started_at:Number(row.started_at)||0,
+    listeners:Math.max(1,Number(row.listeners)||1)};
+}
+// Consolidate identical songs sourced from more than one server. The list is
+// capped to 30 ONLY after merging; listener totals are independent of this cap.
+function summarizeLiveStreams(sources){
+  const songs=new Map();
+  let listenerCount=0,partial=false;
+  for(const source of sources){
+    partial ||= source.partial;
+    if(!source.liveOk)continue;
+    listenerCount+=source.listenerCount;
+    partial ||= source.partial;
+    for(const row of source.live){
+      const stream=normalizeLiveStream(row,source.origin);
+      if(!stream)continue;
+      const key=listenKey(stream);
+      const old=songs.get(key);
+      if(old){old.started_at=Math.max(old.started_at,stream.started_at);old.listeners+=stream.listeners;}
+      else songs.set(key,{...stream,key});
+    }
+  }
+  return {listenerCount,partial,tracks:[...songs.values()].sort((a,b)=>
+    b.started_at-a.started_at||a.key.localeCompare(b.key)).slice(0,MAX_CURRENTLY_STREAMING),
+    keys:new Set(sources.flatMap(source=>(source.liveKeys||source.live)
+      .map(row=>normalizeLiveStream(row,source.origin)).filter(Boolean).map(stream=>listenKey(stream))))};
+}
 async function refreshRecentListens(){
   if(recentBusy||document.hidden)return;
   recentBusy=true;
   try{
     const peers=arr(await (await fetch('/api/network/peers',{cache:'no-store'})).json());
+    peers.forEach(registerPeerRelay);
     const sources=[{base:'',origin:location.origin},...peers.map(p=>({base:p.relay_base||p.url,origin:p.url}))];
     const responses=await Promise.all(sources.map(async source=>{
       const get=async path=>{
         try{
           const r=await fetch(source.base+path,{cache:'no-store',signal:AbortSignal.timeout(6500)});
-          return r.ok?arr(await r.json()):[];
-        }catch{return [];}
+          return r.ok?await r.json():null;
+        }catch{return null;}
       };
-      const [events,live]=await Promise.all([get('/api/recent-listens'),get('/api/active-streams')]);
-      return {events:events.map(e=>({...e,source_server:source.origin})),
-        live:live.map(e=>({...e,source_server:source.origin}))};
+      const [events,liveRaw]=await Promise.all([get('/api/recent-listens'),get('/api/active-streams?summary=1')]);
+      // Older WASP peers still return the legacy array. Their count is only a
+      // lower bound; mark the displayed total with a + until they upgrade.
+      const legacy=Array.isArray(liveRaw);
+      const live=legacy?liveRaw:arr(liveRaw?.tracks);
+      return {events:arr(events).map(e=>({...e,source_server:source.origin})),
+        origin:source.origin,live,liveKeys:legacy?live:arr(liveRaw?.keys).length?arr(liveRaw.keys):live,
+        liveOk:liveRaw!==null,partial:legacy||liveRaw===null,
+        listenerCount:legacy?live.length:Math.max(0,Number(liveRaw?.listener_count)||0)};
     }));
     const all=responses.flatMap(x=>x.events);
     // A peer listen forwarded to its source server can produce two events.
@@ -845,12 +886,71 @@ async function refreshRecentListens(){
       const key=listenKey(x)+'|'+Math.round(Number(x.played_at)/15000);
       if(seen.has(key))return false;seen.add(key);return true;
     }).slice(0,50);
-    activeListeningKeys=new Set(responses.flatMap(x=>x.live).map(listenKey));
-    if(parse().a==='listened')recentListView($('#list'));
+    const live=summarizeLiveStreams(responses);
+    activeListeningKeys=live.keys;
+    activeStreamTracks=live.tracks;
+    activeListenerCount=live.listenerCount;
+    activeListenerCountPartial=live.partial;
+    if(parse().a==='listened'){recentListView($('#list'));markRows();}
   }catch{}finally{recentBusy=false;}
 }
-function recentListView(el){
-  if(!el)return;
+function activeStreamSong(row){
+  const server=registeredPeerOrigin(row.origin);
+  const id=row.track_id;
+  const t=server===location.origin
+    ? byId[id]||tracks.find(t=>!t.origin&&t.id===id)
+    : peerTrackLookup.get(server+'|'+id)||byId[server+'|'+id]||tracks.find(t=>t.origin&&registeredPeerOrigin(t.origin)===server&&(t.remote_id||t.id)===id);
+  const recent=recentListens.find(e=>listenKey(e)===row.key);
+  return {row,t,title:t?.title||recent?.title||'Unknown song',
+    artist:t?artistLine(t):recent?.artist||'Unknown artist',
+    cover:t?albumArt(t):recent?.cover_url||''};
+}
+function liveSongCard(data){
+  const {row,t,title,artist,cover}=data;
+  const count=row.listeners>1?` title="${row.listeners} active playback sessions"`:'';
+  return `<${t?'button':'div'} class="tile sq song live-track"${t?` data-id="${esc(t.id)}"`:''}>${art(cover,title)}
+    <b>${esc(title)}</b><span class="muted">${esc(artist)}</span>
+    <span class="live-track-status"${count}><img src="/streaming.png" alt="" aria-hidden="true">Streaming</span></${t?'button':'div'}>`;
+}
+function listenerBadge(){
+  const label=activeListenerCount.toLocaleString()+ (activeListenerCountPartial?'+':'');
+  const explanation=activeListenerCountPartial?'At least ':' ';
+  return `<span class="live-listeners" role="status" aria-label="${explanation.trim()}${activeListenerCount} active playback sessions" title="${activeListenerCountPartial?'At least ':' '}${activeListenerCount} active playback sessions across connected WASP servers${activeListenerCountPartial?' (a peer is running an older version)':''}"><span>${label}</span><svg aria-hidden="true" viewBox="0 0 24 24"><use href="#i-user"/></svg></span>`;
+}
+function liveSectionHeader(showListeners){
+  return `<div class="live-section-heading"><div><h2>Currently Streaming</h2><p class="muted">Songs being played across connected WASP servers</p></div>
+    <div class="live-stats">${showListeners?listenerBadge():''}<span class="live-badge">LIVE</span></div></div>`;
+}
+function livePreview(){
+  const songs=activeStreamTracks.filter(row=>{
+    if(!query)return true;
+    const data=activeStreamSong(row);
+    return `${data.title} ${data.artist}`.toLowerCase().includes(query);
+  }).map(activeStreamSong);
+  // Reserve one last cell for the overflow button when the full active list
+  // doesn't fit a row. The number of cells adapts to available screen width.
+  const width=Math.max(300,$('#list').clientWidth||window.innerWidth-250);
+  const cols=Math.max(2,Math.floor((width+14)/(170+14)));
+  const more=songs.length>cols;
+  const display=more?songs.slice(0,cols-1):songs;
+  const overflow=more?`<a class="live-more-tile" href="#listened/streaming" aria-label="View currently streaming"><span class="live-more-circle" aria-hidden="true"><span>•••</span></span><b>View currently streaming</b></a>`:'';
+  return `<section class="live-preview" aria-label="Currently Streaming">${liveSectionHeader(false)}
+    ${songs.length?`<div class="live-preview-grid" style="--live-cols:${cols}">${display.map(liveSongCard).join('')}${overflow}</div>`:
+      '<p class="muted live-empty">No songs are being streamed right now.</p>'}</section>`;
+}
+function streamingView(){
+  const songs=activeStreamTracks.filter(row=>{
+    if(!query)return true;
+    const data=activeStreamSong(row);
+    return `${data.title} ${data.artist}`.toLowerCase().includes(query);
+  }).map(activeStreamSong);
+  view={ids:songs.filter(x=>x.t).map(x=>x.t.id),label:'Currently streaming',pl:null};
+  return `<section class="live-full" aria-label="Currently Streaming">${liveSectionHeader(true)}
+    ${songs.length?`<div class="grid s live-all-grid">${songs.map(liveSongCard).join('')}</div>`:
+      '<p class="muted live-empty">No songs are being streamed right now.</p>'}
+    </section>`;
+}
+function recentSongsGrid(){
   const l=recentListens.filter(x=>!query||`${x.title} ${x.artist} ${x.album}`.toLowerCase().includes(query));
   const resolved=l.map(event=>{
     const server=registeredPeerOrigin(event.origin||event.source_server);
@@ -859,19 +959,32 @@ function recentListView(el){
     return {event,t};
   });
   view={ids:resolved.filter(x=>x.t).map(x=>x.t.id),label:'Recently listened',pl:null};
-  el.innerHTML=`<h1>Recently listened</h1><p class="muted" style="margin-top:0">Latest 50 confirmed plays across this WASP server and connected peers · updates every 10 seconds</p>`+
-    (resolved.length?`<div class="grid s">${resolved.map(({event:e,t})=>{
-      const cover=t?albumArt(t):e.cover_url||'';
-      const info=esc(e.title||'Unknown song');
-      const live=activeListeningKeys.has(listenKey(e));
-      const played=Number(e.played_at)||0;
-      const time=`<time class="recent-played-at muted" data-played-at="${played}" aria-label="Last played ${esc(relativeListenTime(played))}">${esc(relativeListenTime(played))}</time>`;
-      const streaming=live?'<span class="recent-streaming" role="img" aria-label="Streaming now" title="Someone is listening right now"><img src="/streaming.png" alt=""></span>':'';
-      return `<${t?'button':'div'} class="tile sq song" ${t?`data-id="${esc(t.id)}"`:''}>${art(cover,e.album||e.title)}<b>${info}</b><span class="muted">${esc(e.artist||'Unknown artist')}</span><div class="recent-listen-meta"><span class="muted">${plural(Number(e.plays)||1,'play')}</span>${time}${streaming}</div></${t?'button':'div'}>`;
-    }).join('')}</div>`:empty('No listening activity recorded yet.'));
+  return resolved.length?`<div class="grid s">${resolved.map(({event:e,t})=>{
+    const cover=t?albumArt(t):e.cover_url||'';
+    const info=esc(e.title||'Unknown song');
+    const live=activeListeningKeys.has(listenKey(e));
+    const played=Number(e.played_at)||0;
+    const time=`<time class="recent-played-at muted" data-played-at="${played}" aria-label="Last played ${esc(relativeListenTime(played))}">${esc(relativeListenTime(played))}</time>`;
+    const streaming=live?'<span class="recent-streaming" role="img" aria-label="Streaming now" title="Someone is listening right now"><img src="/streaming.png" alt=""></span>':'';
+    return `<${t?'button':'div'} class="tile sq song" ${t?`data-id="${esc(t.id)}"`:''}>${art(cover,e.album||e.title)}<b>${info}</b><span class="muted">${esc(e.artist||'Unknown artist')}</span><div class="recent-listen-meta"><span class="muted">${plural(Number(e.plays)||1,'play')}</span>${time}${streaming}</div></${t?'button':'div'}>`;
+  }).join('')}</div>`:empty('No listening activity recorded yet.');
 }
-setInterval(()=>{if(parse().a==='listened')refreshRecentListens();},10000);
+function recentListView(el){
+  if(!el)return;
+  const streaming=parse().arg.split('/')[0]==='streaming';
+  // Keep these subtabs below the heading, as in the approved mockup, rather
+  // than in the global sticky search bar.
+  $('#subbar').hidden=true;
+  const tabs=`<nav class="listened-tabs" aria-label="Listening activity"><a href="#listened"${streaming?'':' aria-current="page"'}>Recently listened</a><a href="#listened/streaming"${streaming?' aria-current="page"':''}>Currently streaming</a></nav>`;
+  el.innerHTML=`<h1>Recently listened</h1><p class="muted" style="margin-top:0">Latest 50 confirmed plays across this WASP server and connected peers · updates every 5 seconds</p>`+
+    tabs+(streaming?streamingView():livePreview()+'<div class="recent-list-divider"></div>'+recentSongsGrid());
+}
+setInterval(()=>{if(parse().a==='listened')refreshRecentListens();},5000);
 setInterval(updateRelativeListenTimes,30000);
+window.addEventListener('resize',()=>{if(parse().a==='listened' && parse().arg!=='streaming'){
+  // A resize changes how many covers fit in the single-row preview.
+  recentListView($('#list'));markRows();
+}});
 // A song with several artists is listed under each of them.
 function artistGrid(el, recent) {
   const by = dict();

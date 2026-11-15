@@ -130,12 +130,17 @@ async function upgradeCommunitySchema(DB) {
 // an existing library just to add short-lived anonymous streaming presence.
 async function upgradeActiveStreamsSchema(DB) {
   const marker=await DB.prepare("SELECT value FROM settings WHERE key='wasp_live_streams_schema'").first();
-  if(marker?.value==='1')return;
+  if(marker?.value==='2')return;
+  // Preserve v15.0.7 active sessions; add a stable start timestamp so the
+  // 30 newest songs are ranked by the moment a stream began, NOT its heartbeat.
   await DB.prepare(`CREATE TABLE IF NOT EXISTS active_streams (
     session_id TEXT PRIMARY KEY, origin TEXT NOT NULL DEFAULT '', track_id TEXT NOT NULL,
-    expires_at INTEGER NOT NULL)`).run();
+    expires_at INTEGER NOT NULL, started_at INTEGER NOT NULL DEFAULT 0)`).run();
+  const columns=(await DB.prepare('PRAGMA table_info(active_streams)').all()).results;
+  if(!columns.some(c=>c.name==='started_at'))
+    await DB.prepare('ALTER TABLE active_streams ADD COLUMN started_at INTEGER NOT NULL DEFAULT 0').run();
   await DB.prepare('CREATE INDEX IF NOT EXISTS idx_active_streams_expiry ON active_streams(expires_at)').run();
-  await DB.prepare("INSERT INTO settings(key,value) VALUES('wasp_live_streams_schema','1') ON CONFLICT(key) DO UPDATE SET value='1'").run();
+  await DB.prepare("INSERT INTO settings(key,value) VALUES('wasp_live_streams_schema','2') ON CONFLICT(key) DO UPDATE SET value='2'").run();
 }
 // Renewed every 25 seconds by an *actually playing* WASP audio element.
 // Expiration is intentionally short so a crashed browser cannot show as live.
@@ -1510,8 +1515,26 @@ async function api(req, env, url, ctx) {
   // Anonymous live playback. A session is an ephemeral random tab ID; never
   // use cookies, account data, network addresses or user identifiers here.
   if(path==="/api/active-streams" && m==="GET"){
+    const now=Date.now();
+    if(url.searchParams.get('summary')==='1'){
+      // A separate aggregate provides a *complete* listener count, even when
+      // the song list is capped. Never expose session IDs or account details.
+      const [tally,rows,keys]=await Promise.all([
+        DB.prepare('SELECT COUNT(*) AS total FROM active_streams WHERE expires_at>?').bind(now).first(),
+        DB.prepare(`SELECT origin,track_id,COUNT(*) AS listeners,
+          MAX(CASE WHEN started_at>0 THEN started_at ELSE expires_at-${STREAM_TTL_MS} END) AS started_at
+          FROM active_streams WHERE expires_at>? GROUP BY origin,track_id
+          ORDER BY started_at DESC,origin,track_id LIMIT 30`).bind(now).all(),
+        // Legacy Recently listened streaming icons must still work for songs
+        // outside the 30-card UI cap. Never return per-listener session IDs.
+        DB.prepare(`SELECT origin,track_id FROM active_streams
+          WHERE expires_at>? GROUP BY origin,track_id LIMIT 1000`).bind(now).all(),
+      ]);
+      return json({listener_count:Number(tally?.total)||0,tracks:rows.results,keys:keys.results},200,{"cache-control":"no-store"});
+    }
+    // Keep the legacy array API intact for older v15.0.7/v15.0.8 clients.
     const rows=(await DB.prepare(`SELECT origin,track_id FROM active_streams
-      WHERE expires_at>? GROUP BY origin,track_id LIMIT 1000`).bind(Date.now()).all()).results;
+      WHERE expires_at>? GROUP BY origin,track_id LIMIT 1000`).bind(now).all()).results;
     return json(rows,200,{"cache-control":"no-store"});
   }
   if(path==="/api/active-streams" && m==="POST"){
@@ -1534,10 +1557,14 @@ async function api(req, env, url, ctx) {
     }else if(!(await DB.prepare('SELECT 1 FROM tracks WHERE id=?').bind(trackId).first())){
       return json({error:'Unknown track'},400);
     }
-    await DB.prepare(`INSERT INTO active_streams(session_id,origin,track_id,expires_at)
-      VALUES(?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET
+    const now=Date.now();
+    await DB.prepare(`INSERT INTO active_streams(session_id,origin,track_id,expires_at,started_at)
+      VALUES(?,?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET
+      started_at=CASE WHEN active_streams.origin=excluded.origin
+        AND active_streams.track_id=excluded.track_id
+        THEN active_streams.started_at ELSE excluded.started_at END,
       origin=excluded.origin,track_id=excluded.track_id,expires_at=excluded.expires_at`)
-      .bind(sessionId,origin,trackId,Date.now()+STREAM_TTL_MS).run();
+      .bind(sessionId,origin,trackId,now+STREAM_TTL_MS,now).run();
     // Low-frequency deletion, not a write on every read or heartbeat.
     if(Math.random()<0.03)await DB.prepare('DELETE FROM active_streams WHERE expires_at<?').bind(Date.now()).run();
     return json({ok:true});
