@@ -95,6 +95,7 @@ let primaryPeerOrigin = "";
 let peerSnapshots = new Map();
 let stalePeerSnapshots = new Set();
 let recentListens = [];
+let activeListeningKeys = new Set();
 let recentBusy=false;
 let view = { ids: [], label: "", pl: null }; // what the main area is showing (what a click on a row plays)
 let queue = [], qi = -1, qLabel = "", ctxPl = null; // what is playing, and the playlist it came from
@@ -828,25 +829,58 @@ function listView(el, tab) {
 }
 
 // Read-only community listening timeline. No usernames or IP addresses are shared.
+function listenKey(event){
+  const origin=registeredPeerOrigin(event.origin||event.source_server||location.origin);
+  return origin+'|'+(event.remote_id||event.track_id||'');
+}
+function relativeListenTime(playedAt,now=Date.now()){
+  const t=Number(playedAt);
+  if(!Number.isFinite(t)||t<=0)return 'Time unknown';
+  const seconds=Math.max(0,Math.floor((now-t)/1000));
+  if(seconds<60)return 'Just now';
+  const mins=Math.floor(seconds/60);
+  if(mins<60)return mins===1?'1 min ago':mins+' mins ago';
+  const hrs=Math.floor(mins/60);
+  if(hrs<24)return hrs===1?'1 hr ago':hrs+' hrs ago';
+  const days=Math.floor(hrs/24);
+  if(days<30)return days===1?'1 day ago':days+' days ago';
+  const months=Math.floor(days/30);
+  if(months<12)return months===1?'1 month ago':months+' months ago';
+  const years=Math.floor(days/365);
+  return years<=1?'1 year ago':years+' years ago';
+}
+function updateRelativeListenTimes(){
+  if(parse().a!=='listened')return;
+  document.querySelectorAll('#list .recent-played-at[data-played-at]').forEach(el=>{
+    el.textContent=relativeListenTime(el.dataset.playedAt);
+    el.setAttribute('aria-label','Last played '+el.textContent);
+  });
+}
 async function refreshRecentListens(){
   if(recentBusy||document.hidden)return;
   recentBusy=true;
   try{
-    const peers=arr(await (await fetch("/api/network/peers",{cache:"no-store"})).json());
-    const sources=[{base:"",origin:location.origin},...peers.map(p=>({base:p.relay_base||p.url,origin:p.url}))];
-    const all=(await Promise.all(sources.map(async source=>{
-      try {const r=await fetch(source.base+"/api/recent-listens",{cache:"no-store",signal:AbortSignal.timeout(6500)});
-        if(!r.ok)return [];
-        return arr(await r.json()).map(x=>({...x,source_server:source.origin}));
-      }catch{return [];}
-    }))).flat();
+    const peers=arr(await (await fetch('/api/network/peers',{cache:'no-store'})).json());
+    const sources=[{base:'',origin:location.origin},...peers.map(p=>({base:p.relay_base||p.url,origin:p.url}))];
+    const responses=await Promise.all(sources.map(async source=>{
+      const get=async path=>{
+        try{
+          const r=await fetch(source.base+path,{cache:'no-store',signal:AbortSignal.timeout(6500)});
+          return r.ok?arr(await r.json()):[];
+        }catch{return [];}
+      };
+      const [events,live]=await Promise.all([get('/api/recent-listens'),get('/api/active-streams')]);
+      return {events:events.map(e=>({...e,source_server:source.origin})),
+        live:live.map(e=>({...e,source_server:source.origin}))};
+    }));
+    const all=responses.flatMap(x=>x.events);
     // A peer listen forwarded to its source server can produce two events.
     const seen=new Set();recentListens=all.sort((x,y)=>Number(y.played_at)-Number(x.played_at)).filter(x=>{
-      const server=x.origin||peerCanonicalOrigins.get(x.source_server)||x.source_server,
-        key=server+"|"+(x.remote_id||x.track_id)+"|"+Math.round(Number(x.played_at)/15000);
+      const key=listenKey(x)+'|'+Math.round(Number(x.played_at)/15000);
       if(seen.has(key))return false;seen.add(key);return true;
     }).slice(0,50);
-    if(parse().a==="listened")recentListView($("#list"));
+    activeListeningKeys=new Set(responses.flatMap(x=>x.live).map(listenKey));
+    if(parse().a==='listened')recentListView($('#list'));
   }catch{}finally{recentBusy=false;}
 }
 function recentListView(el){
@@ -858,15 +892,20 @@ function recentListView(el){
     if(!t)t=tracks.find(t=>!t.origin&&server===location.origin&&t.id===event.track_id);
     return {event,t};
   });
-  view={ids:resolved.filter(x=>x.t).map(x=>x.t.id),label:"Recently listened",pl:null};
+  view={ids:resolved.filter(x=>x.t).map(x=>x.t.id),label:'Recently listened',pl:null};
   el.innerHTML=`<h1>Recently listened</h1><p class="muted" style="margin-top:0">Latest 50 confirmed plays across this WASP server and connected peers · updates every 10 seconds</p>`+
     (resolved.length?`<div class="grid s">${resolved.map(({event:e,t})=>{
-      const cover=t?albumArt(t):e.cover_url||"";
-      const info=`${esc(e.title||"Unknown song")}`;
-      return `<${t?'button':'div'} class="tile sq song" ${t?`data-id="${esc(t.id)}"`:''} >${art(cover,e.album||e.title)}<b>${info}</b><span class="muted">${esc(e.artist||"Unknown artist")}</span><span class="muted">${plural(Number(e.plays)||1,"play")}</span></${t?'button':'div'}>`;
-    }).join("")}</div>`:empty("No listening activity recorded yet."));
+      const cover=t?albumArt(t):e.cover_url||'';
+      const info=esc(e.title||'Unknown song');
+      const live=activeListeningKeys.has(listenKey(e));
+      const played=Number(e.played_at)||0;
+      const time=`<time class="recent-played-at muted" data-played-at="${played}" aria-label="Last played ${esc(relativeListenTime(played))}">${esc(relativeListenTime(played))}</time>`;
+      const streaming=live?'<span class="recent-streaming" role="img" aria-label="Streaming now" title="Someone is listening right now"><img src="/streaming.png" alt=""></span>':'';
+      return `<${t?'button':'div'} class="tile sq song" ${t?`data-id="${esc(t.id)}"`:''}>${art(cover,e.album||e.title)}<b>${info}</b><span class="muted">${esc(e.artist||'Unknown artist')}</span><div class="recent-listen-meta"><span class="muted">${plural(Number(e.plays)||1,'play')}</span>${time}${streaming}</div></${t?'button':'div'}>`;
+    }).join('')}</div>`:empty('No listening activity recorded yet.'));
 }
-setInterval(()=>{if(parse().a==="listened")refreshRecentListens();},10000);
+setInterval(()=>{if(parse().a==='listened')refreshRecentListens();},10000);
+setInterval(updateRelativeListenTimes,30000);
 // A song with several artists is listed under each of them.
 function artistGrid(el, recent) {
   const by = dict();
@@ -1524,6 +1563,7 @@ function play(id) {
   // Peer listens count on this WASP instance without altering the peer's files.
   audio.src = mediaUrl(t, "/audio/" + enc(t.remote_id || (t.origin && String(id).startsWith(t.origin+"|") ? String(id).slice(t.origin.length+1) : id)));
   audio.play().catch(() => {});
+  // Keep the earlier stream active only until the new audio begins playing.
   $("#pc").innerHTML = art(albumArt(t), albumName(t) || t.title, "lg");
   $("#pt").textContent = t.title; $("#pa").textContent = artistLine(t) + (albumName(t) ? " · " + albumName(t) : "");
   if (navigator.mediaSession && typeof MediaMetadata === "function") {
@@ -1902,6 +1942,50 @@ function syncLyrics(force) {
 }
 $("#lybody").addEventListener("click", (e) => { const b = e.target.closest(".ly"); if (b) { audio.currentTime = +b.dataset.t; audio.play(); } });
 audio.addEventListener("seeked", () => syncLyrics());
+
+// v15.0.7: a live signal means HTMLAudioElement playback, not a range
+// request or a completed play count. The random in-memory ID is not linked to
+// a user, visitor cookie, IP, or account and is never returned by the API.
+const liveStreamSession=makeId();
+let reportedStream=null, lastStreamHeartbeat=0;
+let streamPostChain=Promise.resolve();
+function streamPayload(t){
+  return {origin:t.origin?registeredPeerOrigin(t.origin):'',
+    track_id:t.origin?(t.remote_id||String(t.id).split('|').at(-1)):t.id};
+}
+function streamPost(action,track){
+  const body=JSON.stringify({session_id:liveStreamSession,action,...(track||{})});
+  // Serialize state changes: an older pause must not outrun a newer play.
+  streamPostChain=streamPostChain.catch(()=>{}).then(()=>fetch('/api/active-streams',{
+    method:'POST',headers:{'content-type':'application/json'},body,cache:'no-store',keepalive:true
+  }).catch(()=>{}));
+}
+function syncLiveStream(force=false){
+  const t=cur();
+  const playing=!!(t&&audio.currentSrc&&!audio.paused&&!audio.ended&&audio.readyState>=2);
+  const key=playing?listenKey({...streamPayload(t),source_server:location.origin}):'';
+  const now=Date.now();
+  if(!playing){
+    if(reportedStream){reportedStream=null;lastStreamHeartbeat=0;streamPost('stop');}
+    return;
+  }
+  if(reportedStream!==key||force||now-lastStreamHeartbeat>=25000){
+    reportedStream=key;lastStreamHeartbeat=now;streamPost('playing',streamPayload(t));
+  }
+}
+audio.addEventListener('playing',()=>syncLiveStream(true));
+audio.addEventListener('play',()=>syncLiveStream());
+audio.addEventListener('pause',()=>syncLiveStream());
+audio.addEventListener('ended',()=>syncLiveStream());
+audio.addEventListener('emptied',()=>syncLiveStream());
+setInterval(()=>syncLiveStream(),5000);
+window.addEventListener('pagehide',()=>{
+  if(reportedStream){
+    reportedStream=null;
+    // A page being discarded cannot await fetch; the TTL is a fallback.
+    try{navigator.sendBeacon('/api/active-streams',new Blob([JSON.stringify({session_id:liveStreamSession,action:'stop'})],{type:'application/json'}));}catch{}
+  }
+});
 
 audio.addEventListener("timeupdate", () => {
   $("#cur").textContent = fmt(audio.currentTime); $("#dur").textContent = fmt(audio.duration);

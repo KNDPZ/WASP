@@ -4,7 +4,7 @@ import re
 from playwright.sync_api import sync_playwright
 ROOT=Path(__file__).resolve().parents[1]/'public'
 css=(ROOT/'style.css').read_text()
-index=(ROOT/'index.html').read_text().replace('<link rel="stylesheet" href="/style.css?v=15.0.6">',f'<style>{css}</style>')
+index=re.sub(r'<link rel="stylesheet" href="/style.css(?:\?v=[^"]+)?">',f'<style>{css}</style>',(ROOT/'index.html').read_text())
 index=re.sub(r'<script[^>]*src="/app.js(?:\?v=[^"]+)?"[^>]*></script>','',index)
 admin_html=(ROOT/'admin.html').read_text().replace('<link rel="stylesheet" href="/style.css?v=15.0.6">',f'<style>{css}</style>')
 admin_html=re.sub(r'<script[^>]*src="/admin.js(?:\?v=[^"]+)?"[^>]*></script>','',admin_html)

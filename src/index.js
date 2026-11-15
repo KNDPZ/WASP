@@ -4,8 +4,8 @@ import {extractEmbeddedArt, MAX_ID3_ART_READ, MAX_EMBEDDED_IMAGE} from "./embedd
 // Storage: R2 (mp3 files + artwork, binding MUSIC) and D1 (library, playlists, reactions, admin hash, sessions, binding DB).
 
 // Salted PBKDF2 hash of the first-time admin password. Change it from the admin page after first login.
-const BUILD_VERSION = "15.0.6";
-const BUILD_LABEL = "Federated Library · Publishing Permissions & Notifications";
+const BUILD_VERSION = "15.0.7";
+const BUILD_LABEL = "Federated Library · Live Listening Activity";
 const DEFAULT_SALT = "9756e918a7545f9eec461ee48491018a";
 const DEFAULT_HASH = "539db4ea2054366abc97375b551b16c115622e1a89b8f9cf75cea28345c6ba26";
 
@@ -126,6 +126,20 @@ async function upgradeCommunitySchema(DB) {
   for (const sql of COMMUNITY_SCHEMA) await DB.prepare(sql).run();
   await DB.prepare("INSERT INTO settings(key,value) VALUES('wasp_schema_version','15.3') ON CONFLICT(key) DO UPDATE SET value='15.3'").run();
 }
+// Independent additive migration: do not re-run community upgrades or rewrite
+// an existing library just to add short-lived anonymous streaming presence.
+async function upgradeActiveStreamsSchema(DB) {
+  const marker=await DB.prepare("SELECT value FROM settings WHERE key='wasp_live_streams_schema'").first();
+  if(marker?.value==='1')return;
+  await DB.prepare(`CREATE TABLE IF NOT EXISTS active_streams (
+    session_id TEXT PRIMARY KEY, origin TEXT NOT NULL DEFAULT '', track_id TEXT NOT NULL,
+    expires_at INTEGER NOT NULL)`).run();
+  await DB.prepare('CREATE INDEX IF NOT EXISTS idx_active_streams_expiry ON active_streams(expires_at)').run();
+  await DB.prepare("INSERT INTO settings(key,value) VALUES('wasp_live_streams_schema','1') ON CONFLICT(key) DO UPDATE SET value='1'").run();
+}
+// Renewed every 25 seconds by an *actually playing* WASP audio element.
+// Expiration is intentionally short so a crashed browser cannot show as live.
+const STREAM_TTL_MS = 65000;
 // Explicit per-user overrides win over the global default. A missing row means
 // "inherit global" so newly registered accounts receive the current default.
 const PUBLISH_DEFAULT_SQL = "COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key='user_publish_default'),0)";
@@ -280,11 +294,12 @@ function init(env) {
       await q("CREATE INDEX IF NOT EXISTS idx_tracks_created ON tracks(created_at DESC)").run();
       // Advance only after every required DDL operation succeeds.
       await upgradeCommunitySchema(env.DB);
+      await upgradeActiveStreamsSchema(env.DB);
       return;
     }
-    if(marker?.value === "15.3")return;
-    if(marker?.value === "15.2") {await upgradeCommunitySchema(env.DB);return;}
-    if(marker?.value === "15.1") {await upgradeCommunitySchema(env.DB);return;}
+    if(marker?.value === "15.3"){await upgradeActiveStreamsSchema(env.DB);return;}
+    if(marker?.value === "15.2") {await upgradeCommunitySchema(env.DB);await upgradeActiveStreamsSchema(env.DB);return;}
+    if(marker?.value === "15.1") {await upgradeCommunitySchema(env.DB);await upgradeActiveStreamsSchema(env.DB);return;}
     // Multiple Cloudflare isolates may start together across data centers.
     // A D1-backed lease prevents simultaneous backfills and repeated index
     // builds from multiplying the free-tier writes on initial deployment.
@@ -404,6 +419,7 @@ function init(env) {
     // Only set the marker after all essential work succeeds; partial migrations
     // safely retry on the next cold start rather than hiding a missing index.
     await upgradeCommunitySchema(env.DB);
+    await upgradeActiveStreamsSchema(env.DB);
     } finally {
       if(claimed) await q("DELETE FROM settings WHERE key='wasp_v14_migration_lease' AND value=?").bind(lease).run().catch(()=>{});
     }
@@ -1490,6 +1506,41 @@ async function api(req, env, url, ctx) {
       item[part.kind].push(...JSON.parse(part.body));
     }}
     return json([...mapping.values()],200,{"cache-control":"no-store"});
+  }
+  // Anonymous live playback. A session is an ephemeral random tab ID; never
+  // use cookies, account data, network addresses or user identifiers here.
+  if(path==="/api/active-streams" && m==="GET"){
+    const rows=(await DB.prepare(`SELECT origin,track_id FROM active_streams
+      WHERE expires_at>? GROUP BY origin,track_id LIMIT 1000`).bind(Date.now()).all()).results;
+    return json(rows,200,{"cache-control":"no-store"});
+  }
+  if(path==="/api/active-streams" && m==="POST"){
+    const b=await req.json().catch(()=>({}));
+    const sessionId=typeof b.session_id==='string'?b.session_id:'';
+    if(!/^[a-f0-9-]{36}$/i.test(sessionId))return json({error:'Invalid playback session'},400);
+    const action=b.action;
+    if(action==='stop'){
+      // Only stop this tab's currently reported track; no listener identity.
+      await DB.prepare('DELETE FROM active_streams WHERE session_id=?').bind(sessionId).run();
+      return json({ok:true});
+    }
+    if(action!=='playing')return json({error:'Unknown playback state'},400);
+    const origin=clean(b.origin,300).replace(/\/$/,''),trackId=clean(b.track_id,120);
+    if(!/^[\w-]{1,120}$/.test(trackId))return json({error:'Invalid track'},400);
+    if(origin){
+      let u;try{u=new URL(origin);}catch{return json({error:'Invalid peer origin'},400);}
+      if(u.origin!==origin||!['http:','https:'].includes(u.protocol)||!(await knownPeer(DB,origin)))
+        return json({error:'Unknown peer'},400);
+    }else if(!(await DB.prepare('SELECT 1 FROM tracks WHERE id=?').bind(trackId).first())){
+      return json({error:'Unknown track'},400);
+    }
+    await DB.prepare(`INSERT INTO active_streams(session_id,origin,track_id,expires_at)
+      VALUES(?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET
+      origin=excluded.origin,track_id=excluded.track_id,expires_at=excluded.expires_at`)
+      .bind(sessionId,origin,trackId,Date.now()+STREAM_TTL_MS).run();
+    // Low-frequency deletion, not a write on every read or heartbeat.
+    if(Math.random()<0.03)await DB.prepare('DELETE FROM active_streams WHERE expires_at<?').bind(Date.now()).run();
+    return json({ok:true});
   }
   if(path==="/api/recent-listens" && m==="GET"){
     const rows=(await DB.prepare("SELECT r.track_id,r.origin,r.remote_id,r.title,r.artist,r.album,r.cover_url,r.played_at,COALESCE(t.plays,p.plays,0) AS plays FROM recent_listens r LEFT JOIN tracks t ON r.origin='' AND t.id=r.track_id LEFT JOIN peer_listens p ON r.origin<>'' AND p.remote_id=r.remote_id AND p.origin=r.origin ORDER BY r.played_at DESC LIMIT 50").all()).results;
@@ -2805,7 +2856,7 @@ export default {
       if (url.pathname.startsWith("/api/")) {
         const res = await api(req, env, url, ctx);
         // CORS only on public read endpoints (not admin)
-        const publicPeer = share && (url.pathname === "/api/tracks" || url.pathname === "/api/playlists" || url.pathname === "/api/user-playlists" || url.pathname === "/api/site" || url.pathname === "/api/peer" || url.pathname === "/api/network/peers" || url.pathname === "/api/catalog-version" || url.pathname === "/api/peer-plays" || url.pathname === "/api/recent-listens");
+        const publicPeer = share && (url.pathname === "/api/tracks" || url.pathname === "/api/playlists" || url.pathname === "/api/user-playlists" || url.pathname === "/api/site" || url.pathname === "/api/peer" || url.pathname === "/api/network/peers" || url.pathname === "/api/catalog-version" || url.pathname === "/api/peer-plays" || url.pathname === "/api/recent-listens" || url.pathname === "/api/active-streams");
         const output=withCors(res,publicPeer);
         if(req.method !== "GET" && output.ok && changesCatalogue(url.pathname)) {
           try { await touchCatalogue(env.DB); } catch(e) {console.warn("Unable to update catalogue revision",e.message);}
