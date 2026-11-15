@@ -32,7 +32,7 @@ function showPane() {
   $("#docsNav").setAttribute("aria-current",k==="docs"?"page":"false");
   if (k === "docs") loadDocs();
   if (k === "requests") showRequestTab(route === "requests/spotify");
-  if (k === "network") showNetworkTab(route === "network/crons");
+  if (k === "network") showNetworkTab(route.split("/")[1] || "peers");
   pollAdminPublishRequests();
   window.scrollTo(0, 0);
 }
@@ -571,6 +571,73 @@ $("#files").addEventListener("change", (e) => { enqueue(e.target.files); e.targe
 ["dragleave", "drop"].forEach((n) => drop.addEventListener(n, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
 drop.addEventListener("drop", (e) => enqueue(e.dataTransfer.files));
 
+// WASP v16.0.2 Mobile Bridge: managed by Network → Mobile Bridge.
+let mobileBridgeLoaded=false;
+function mobileSetupMessage(message,error=false){
+  const el=$('#mobileSecretFeedback');el.textContent=message||'';el.classList.toggle('err',!!error);
+}
+function showMobileBridgeState(data){
+  const ready=!!data.secret_ready;
+  $('#mobileBridgeToggle').checked=!!data.enabled;
+  $('#mobileBridgeFeatureState').textContent='Bridge: '+(data.enabled?'Enabled':'Disabled');
+  $('#mobileBridgeEncryptionState').textContent='Encryption: '+(ready?'Configured':'Missing');
+  $('#mobileBridgeApiState').textContent='Mobile API: '+(ready&&data.enabled?'Ready':'Unavailable');
+  const state=$('#mobileSecretState');
+  state.textContent=ready?'✓ Encryption configured — mobile credentials can be issued when enabled.':'⚠ Setup required — server encryption secret is missing. Members cannot create mobile keys.';
+  state.style.color=ready?'var(--accent, #c8f169)':'var(--danger, #ff6673)';
+  $('#mobileSecretSetup').classList.toggle('hidden',ready);
+  $('#mobileSecretResetControls').classList.toggle('hidden',!ready);
+  $('#mobileSecretMigrateControls').classList.toggle('hidden',!ready||data.secret_source==='wasp');
+  if(ready){$('#mobileSecretImportForm').classList.add('hidden');$('#mobileExistingSecret').value='';}
+  $('#mobileBridgeAdminStatus').textContent=data.enabled?(ready?'Mobile Bridge is enabled and ready.':'Mobile Bridge enabled but setup is incomplete.'):'Mobile Bridge is disabled.';
+  $('#mobileBridgeAdminStatus').classList.toggle('err',!!data.enabled&&!ready);
+  $('#mobileBridgeUrl').textContent=location.origin+'/mobile';
+}
+async function loadMobileBridgeSettings(){
+  try{
+    const r=await fetch('/api/admin/mobile-bridge',{cache:'no-store'});
+    const data=await r.json();if(!r.ok)throw Error(data.error||'Unable to read Mobile Bridge settings.');
+    showMobileBridgeState(data);mobileBridgeLoaded=true;
+  }catch(e){mobileSetupMessage(e.message,true);}
+}
+$('#mobileBridgeSave').addEventListener('click',async()=>{
+  const button=$('#mobileBridgeSave');button.disabled=true;
+  try{
+    const r=await post('/api/admin/mobile-bridge',{enabled:$('#mobileBridgeToggle').checked},'PUT');
+    const data=await r.json();if(!r.ok)throw Error(data.error||'Unable to save Mobile Bridge settings.');
+    showMobileBridgeState(data);mobileSetupMessage('Mobile Bridge settings saved.');
+  }catch(e){mobileSetupMessage(e.message,true);}finally{button.disabled=false;}
+});
+async function configureMobileSecret(payload,button){
+  button.disabled=true;
+  try{
+    const r=await post('/api/admin/mobile-bridge/secret',payload);
+    const data=await r.json();if(!r.ok)throw Error(data.error||'Could not configure the secret.');
+    showMobileBridgeState(data);
+    $('#mobileSecretResetForm').classList.add('hidden');$('#mobileSecretResetWord').value='';
+    mobileSetupMessage(payload.action==='rotate'?'Secret reset. All previous mobile app keys have been revoked.':payload.action==='migrate'?'Existing secret moved into WASP storage. Previous mobile keys remain valid.':'Server secret configured. Members can now create mobile keys when Mobile Bridge is enabled.');
+  }catch(e){mobileSetupMessage(e.message,true);}finally{button.disabled=false;}
+}
+$('#mobileSecretGenerate').addEventListener('click',e=>configureMobileSecret({action:'generate'},e.currentTarget));
+$('#mobileSecretMigrate').addEventListener('click',e=>configureMobileSecret({action:'migrate'},e.currentTarget));
+$('#mobileSecretImportToggle').addEventListener('click',e=>{
+  const form=$('#mobileSecretImportForm');form.classList.toggle('hidden');e.currentTarget.setAttribute('aria-expanded',String(!form.classList.contains('hidden')));
+});
+$('#mobileSecretImportCancel').addEventListener('click',()=>{$('#mobileSecretImportForm').classList.add('hidden');$('#mobileExistingSecret').value='';});
+$('#mobileSecretImportForm').addEventListener('submit',async e=>{
+  e.preventDefault();const secret=$('#mobileExistingSecret').value.trim();
+  await configureMobileSecret({action:'import',secret},e.currentTarget.querySelector('button[type="submit"]'));
+});
+$('#mobileSecretResetStart').addEventListener('click',()=>{$('#mobileSecretResetForm').classList.remove('hidden');$('#mobileSecretResetWord').focus();});
+$('#mobileSecretResetCancel').addEventListener('click',()=>{$('#mobileSecretResetForm').classList.add('hidden');$('#mobileSecretResetWord').value='';});
+$('#mobileSecretResetForm').addEventListener('submit',async e=>{
+  e.preventDefault();const word=$('#mobileSecretResetWord').value;
+  await configureMobileSecret({action:'rotate',confirm:word},e.currentTarget.querySelector('button[type="submit"]'));
+});
+$('#mobileBridgeCopyUrl').addEventListener('click',async()=>{
+  try{await navigator.clipboard.writeText(location.origin+'/mobile');mobileSetupMessage('Mobile Bridge URL copied.');}
+  catch{mobileSetupMessage('Copy the address displayed above.',true);}
+});
 // ---------- general settings: branding + advertising ----------
 let site = null;
 function paintFavicon() {
@@ -883,15 +950,19 @@ const availableZones=()=>{
   return [...new Set(["Asia/Manila","UTC",...zones])].sort();
 };
 let cronsLoaded=false;
-function showNetworkTab(crons){
-  $("#netTabPeers").setAttribute("aria-selected",String(!crons));
-  $("#netTabCrons").setAttribute("aria-selected",String(crons));
-  $("#netPeersPanel").classList.toggle("hidden",crons);
-  $("#netCronsPanel").classList.toggle("hidden",!crons);
-  if(crons&&!cronsLoaded)loadCrons();
+function showNetworkTab(section='peers'){
+  if(typeof section==='boolean')section=section?'crons':'peers'; // v14 compatibility
+  const selected=['peers','mobile','crons'].includes(section)?section:'peers';
+  for(const [tab,panel,name] of [['netTabPeers','netPeersPanel','peers'],['netTabMobile','netMobilePanel','mobile'],['netTabCrons','netCronsPanel','crons']]){
+    $('#'+tab).setAttribute('aria-selected',String(selected===name));
+    $('#'+panel).classList.toggle('hidden',selected!==name);
+  }
+  if(selected==='crons'&&!cronsLoaded)loadCrons();
+  if(selected==='mobile'&&!mobileBridgeLoaded)loadMobileBridgeSettings();
 }
-$("#netTabPeers").onclick=()=>{location.hash="network";showNetworkTab(false);};
-$("#netTabCrons").onclick=()=>{location.hash="network/crons";showNetworkTab(true);};
+$('#netTabPeers').onclick=()=>{location.hash='network';showNetworkTab('peers');};
+$('#netTabMobile').onclick=()=>{location.hash='network/mobile';showNetworkTab('mobile');};
+$('#netTabCrons').onclick=()=>{location.hash='network/crons';showNetworkTab('crons');};
 function cronJobTemplate(key){
   const id="cron-"+key;
   return `<fieldset class="cron-job" id="${id}" style="border:1px solid var(--line2);border-radius:12px;margin:16px 0;padding:14px">
@@ -1061,15 +1132,17 @@ $("#netPeers").addEventListener("click", async (e) => {
     try {
       if(hard){const r=await fetch(`/api/admin/network/peers/${encodeURIComponent(id)}/refresh`,{method:"POST",cache:"no-store"});
         const j=await r.json();if(!r.ok)throw Error(j.error||"Peer refresh failed");}
-      const totals={};const phases=[["tracks",40],["playlists",70],["users",95],["finish",100]];
+      const totals={};let federation=null;const phases=[["tracks",40],["playlists",70],["users",86],["finish",100]];
       for(const [phase,percent] of phases){
         message.textContent=`${phase==="finish"?"Publishing":`Syncing ${phase}`}…`;
         const r=await post(`/api/admin/network/peers/${encodeURIComponent(id)}/sync`,{phase});
         const j=await r.json().catch(()=>({}));if(!r.ok)throw Error(j.error||`Unable to sync ${phase}`);
-        totals[phase]=j.count||0;bar.value=percent;
+        totals[phase]=j.count||0;if(phase==="finish")federation=j.federation||null;bar.value=percent;
       }
-      message.textContent=`Complete: ${totals.tracks} songs, ${totals.playlists} server playlists, ${totals.users} user playlists.`;
-      flashMsg("#netMsg",`Synced ${totals.tracks} songs and ${totals.playlists+totals.users} playlists. No audio files downloaded.`);
+      const extra=federation?` + ${federation.tracks||0} songs from ${federation.sources||0} connected downstream peers`:'';
+      const warning=federation?.errors?.length?` (${federation.errors.length} source warning(s); see Mobile Bridge deployment guide)`:'';
+      message.textContent=`Complete: ${totals.tracks} gateway songs, ${totals.playlists} server playlists, ${totals.users} user playlists${extra}${warning}.`;
+      flashMsg("#netMsg",`Synced ${totals.tracks+(federation?.tracks||0)} songs and ${totals.playlists+totals.users+(federation?.playlists||0)} playlists. No audio files downloaded.${federation?.errors?.length?" Some downstream peers unavailable.":""}`);
       // Notify other tabs on the same origin. Their periodic revision check will reload.
       try{localStorage.setItem("wasp_peer_sync",String(Date.now()));}catch{}
       await loadNetwork();

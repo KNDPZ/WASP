@@ -2135,7 +2135,7 @@ let accountSettingsOpenToken = 0;
 let accountSettingsTabToken = 0;
 const accountSettingsDialog = $("#accountSettingsDialog");
 const accountSettingsMount = $("#accountSettingsMount");
-function settingsTab(value){return value === "publish" ? "publish" : "account";}
+function settingsTab(value){return ["publish","mobile"].includes(value) ? value : "account";}
 function settingsFeedback(node,message,error=false){
   if(!node)return;
   node.textContent=message;
@@ -2167,6 +2167,50 @@ async function renderAccountSettingsSection(which="account"){
     }
     if(me.role!=='user'){
       place.innerHTML='<p>Administrator account settings are managed in the admin dashboard.</p><a class="btn account-admin-link" href="/admin.html#account">Open admin account settings</a>';
+      return;
+    }
+    if(which==='mobile'){
+      const response=await fetch('/api/user/mobile-keys',{cache:'no-store'});
+      if(!response.ok)throw Error('Could not load Mobile Bridge access.');
+      const mobile=await response.json();
+      if(token!==accountSettingsTabToken||!d.open)return;
+      place.innerHTML=`<div class="settings-panel"><h3>WASP Mobile Bridge <span class="muted">· v16.0.2 staging</span></h3>
+        <p class="muted">Connect Subsonic / OpenSubsonic applications to this WASP server. Use a separate key per device. Do not enter your WASP website password into a mobile player.</p>
+        <p><strong>Server URL:</strong> <code>${esc(location.origin)}/mobile</code> <button type="button" class="btn ghost" id="copyMobileUrl">Copy URL</button></p>
+        <p class="muted">Server status: ${mobile.enabled?'Enabled':'Disabled by administrator'}. ${mobile.secret_ready?'Mobile credentials available.':'Setup required. Ask an administrator to configure the secret under Admin → Network → Mobile Bridge.'}</p>
+        <form id="createMobileKey" class="password-form" autocomplete="off"><label>Device / app name
+          <input name="label" required minlength="2" maxlength="64" placeholder="My Android music player"></label>
+          <button type="submit" class="btn" ${!mobile.enabled||!mobile.secret_ready?'disabled':''}>Generate mobile app key</button></form>
+        <div id="mobileSecretBox" class="hidden" role="status" aria-live="polite"></div>
+        <p id="mobileFeedback" class="msg" role="status" aria-live="polite"></p>
+        <h3>Connected devices</h3><div id="mobileKeyList">${mobile.keys.length?mobile.keys.map(k=>`<div class="published-peer-row"><div><strong>${esc(k.label)}</strong><p class="muted">Created ${new Date(k.created_at).toLocaleString()}</p></div><button type="button" class="btn ghost" data-revoke-mobile="${esc(k.id)}">Revoke</button></div>`).join(''):'<p class="muted">No mobile keys yet.</p>'}</div>
+        <p class="muted">The key is displayed once. Storing it in your chosen music player gives that app access to this WASP server until you revoke it.</p></div>`;
+      place.querySelector('#copyMobileUrl').onclick=async()=>{try{await navigator.clipboard.writeText(location.origin+'/mobile');settingsFeedback(place.querySelector('#mobileFeedback'),'Server URL copied.');}catch{settingsFeedback(place.querySelector('#mobileFeedback'),'Copy the server URL shown above.',true);}};
+      place.querySelector('#createMobileKey').onsubmit=async e=>{
+        e.preventDefault();const form=e.currentTarget,button=form.querySelector('button');button.disabled=true;
+        try{
+          const res=await postJSON('/api/user/mobile-keys',{label:form.elements.label.value});
+          const v=await res.json();if(!res.ok)throw Error(v.error||'Could not create mobile key.');
+          const secret=place.querySelector('#mobileSecretBox');secret.classList.remove('hidden');secret.replaceChildren();
+          const heading=document.createElement('p');heading.textContent='Copy this key now — it will not be shown again.';
+          const code=document.createElement('code');code.textContent=v.secret;code.style.overflowWrap='anywhere';
+          const copy=document.createElement('button');copy.type='button';copy.className='btn ghost';copy.textContent='Copy key';copy.onclick=async()=>{await navigator.clipboard.writeText(v.secret);copy.textContent='Copied';};
+          secret.append(heading,code,document.createElement('br'),copy);
+          form.reset();const list=place.querySelector('#mobileKeyList');
+          const row=document.createElement('div');row.className='published-peer-row';const label=document.createElement('strong');label.textContent=v.label;
+          const revoke=document.createElement('button');revoke.type='button';revoke.className='btn ghost';revoke.textContent='Revoke';revoke.dataset.revokeMobile=v.id;
+          row.append(label,revoke);list.querySelector('.muted')?.remove();list.prepend(row);
+          settingsFeedback(place.querySelector('#mobileFeedback'),'Mobile key created. Store it securely.');
+        }catch(err){settingsFeedback(place.querySelector('#mobileFeedback'),err.message,true);}
+        finally{button.disabled=!mobile.enabled||!mobile.secret_ready;}
+      };
+      place.querySelector('#mobileKeyList').addEventListener('click',async e=>{
+        const button=e.target.closest('[data-revoke-mobile]');if(!button)return;
+        if(!confirm('Revoke access for this mobile device?'))return;
+        button.disabled=true;
+        try{const r=await fetch('/api/user/mobile-keys/'+encodeURIComponent(button.dataset.revokeMobile),{method:'DELETE'});if(!r.ok)throw Error('Could not revoke key.');button.closest('.published-peer-row')?.remove();settingsFeedback(place.querySelector('#mobileFeedback'),'Mobile device revoked.');}
+        catch(err){settingsFeedback(place.querySelector('#mobileFeedback'),err.message,true);button.disabled=false;}
+      });
       return;
     }
     if(which==='publish'){
@@ -2253,7 +2297,7 @@ async function openAccountSettings(section='account'){
       button.onclick=()=>renderAccountSettingsSection(button.dataset.settingsTab);
       button.addEventListener('keydown',e=>{
         if(!['ArrowLeft','ArrowRight'].includes(e.key))return;
-        e.preventDefault();const next=button.dataset.settingsTab==='account'?'publish':'account';
+        e.preventDefault();const next=button.dataset.settingsTab==='account'?'publish':button.dataset.settingsTab==='publish'?'mobile':'account';
         const target=accountSettingsMount.querySelector(`[data-settings-tab="${next}"]`);
         target.focus();void renderAccountSettingsSection(next);
       });
