@@ -13,4 +13,8 @@
   // No IDs on purpose: Wrangler creates these on first deploy and keeps them linked.
   "r2_buckets": [{ "binding": "MUSIC" }],
   "d1_databases": [{ "binding": "DB" }]
+"vars": {
+    "METADATA_SETTINGS_KEY": "d0c1b9a36ef1a878421795d8b73b816a",
+    "SPOTIFY_SETTINGS_KEY": "d0c1b9a36ef1a878421795d8b73b816a"
+  },
 }
