@@ -398,7 +398,7 @@ $("#spotifyConfigDelete").addEventListener("click", async () => {
 const openReq = new Set();
 async function loadRequests() {
   let list = [];
-  try { list = await (await fetch("/api/admin/requests")).json(); } catch {}
+  try { const res=await fetch("/api/admin/requests");if(!res.ok)throw Error(`Request queue unavailable (HTTP ${res.status})`);list=await res.json(); } catch(e) { $("#reqRows").textContent=e.message;return; }
   if (!Array.isArray(list)) list = [];
   window.__reqs = list;
   $("#reqRows").innerHTML = list.length ? `<table><tbody>${list.map((r) => {
@@ -407,11 +407,11 @@ async function loadRequests() {
     const sourceCount=Number.isSafeInteger(r.source_total)?r.source_total:null;
     const knownIncomplete=has && sourceCount!==null && sourceCount>r.total;
     const unverifiedBoundary=has && !!r.partial && !knownIncomplete;
-    const progress = has ? `${r.matched}/${r.total}${knownIncomplete ? ` of ${sourceCount} reported` : unverifiedBoundary ? "+" : ""} · ${r.matched_local??r.matched} local · ${r.matched_peer||0} in peers · ${miss} missing song${miss === 1 ? "" : "s"}` : pl ? "Song list not available" : "";
+    const progress = has ? `${r.matched}/${r.total}${knownIncomplete ? ` of ${sourceCount} reported` : unverifiedBoundary ? "+" : ""} · ${r.matched_local??r.matched} local · ${r.matched_peer||0} in peers · ${miss} missing song${miss === 1 ? "" : "s"}` : pl ? (r.total!=null ? "Availability check pending — refresh or wait for scheduled matching" : "Song list not available") : "";
     const open = openReq.has(r.id);
     return `<tr data-r="${r.id}">
     <td style="width:56px">${mini(r.image, r.title)}</td>
-    <td>${esc(r.title)}${r.remote?' <span class="chip" title="Originating WASP retains ownership">HIVE peer</span>':''}<br><span class="muted">${KIND[r.kind]}${r.artist ? " · " + esc(r.artist) : ""}${r.url ? ` · <a href="${esc(r.url)}" target="_blank" rel="noopener">Open on Spotify</a>` : ""}</span>${progress ? `<br><span class="muted">${esc(progress)}</span>` : ""}</td>
+    <td>${esc(r.title)}${r.remote?' <span class="chip" title="Originating WASP retains ownership">HIVE peer</span>':''}<br><span class="muted">${KIND[r.kind]}${r.artist ? " · " + esc(r.artist) : ""}${r.url ? ` · <a href="${esc(r.url)}" target="_blank" rel="noopener">Open on Spotify</a>` : ""}</span>${progress ? `<br><span class="muted">${esc(progress)}${r.availability_checked_at?` · Checked ${esc(new Date(r.availability_checked_at).toLocaleString())}`:""}</span>` : ""}</td>
     <td style="text-align:right;white-space:nowrap">${has ? `<button class="btn ghost" data-a="toggle" aria-expanded="${open}" aria-label="Show missing songs" ${small}>${open ? "▴" : "▾"}</button> ` : ""}${pl && !r.remote ? `<button class="btn ghost" data-a="refresh" ${small}>Refresh</button> ` : ""}${r.remote?'<span class="muted">Managed by originating WASP</span>':`<button class="btn ghost" data-a="remove" ${small}>Remove</button>`}</td></tr>
     ${has ? `<tr class="reqdetail${open ? "" : " hidden"}" data-d="${r.id}"><td></td><td colspan="2">
       ${miss ? `<ul class="missing">${r.missing.map((x) => `<li>${esc(x.t)}${x.a ? ` <span class="muted">· ${esc(x.a)}</span>` : ""}</li>`).join("")}</ul>` : `<p class="muted" style="margin:8px 0">Every song we can see is already in the library.</p>`}
@@ -995,16 +995,23 @@ const availableZones=()=>{
 let cronsLoaded=false;
 function showNetworkTab(section='peers'){
   if(typeof section==='boolean')section=section?'crons':'peers'; // v14 compatibility
-  const selected=['peers','mobile','crons'].includes(section)?section:'peers';
-  for(const [tab,panel,name] of [['netTabPeers','netPeersPanel','peers'],['netTabMobile','netMobilePanel','mobile'],['netTabCrons','netCronsPanel','crons']]){
+  const selected=['peers','mobile','crons','telemetry'].includes(section)?section:'peers';
+  for(const [tab,panel,name] of [['netTabPeers','netPeersPanel','peers'],['netTabMobile','netMobilePanel','mobile'],['netTabCrons','netCronsPanel','crons'],['netTabTelemetry','netTelemetryPanel','telemetry']]){
     $('#'+tab).setAttribute('aria-selected',String(selected===name));
     $('#'+panel).classList.toggle('hidden',selected!==name);
   }
+  if(selected==='telemetry')loadMetadataSettings();
   if(selected==='crons'&&!cronsLoaded)loadCrons();
   if(selected==='mobile'&&!mobileBridgeLoaded)loadMobileBridgeSettings();
 }
 $('#netTabPeers').onclick=()=>{location.hash='network';showNetworkTab('peers');};
 $('#netTabMobile').onclick=()=>{location.hash='network/mobile';showNetworkTab('mobile');};
+$('#netTabTelemetry').onclick=()=>{location.hash='network/telemetry';showNetworkTab('telemetry');};
+const metadataFields={lastfm:'metadataLastfm',musicbrainz:'metadataMusicbrainz',enabled:'metadataEnabled',fallback:'metadataFallback',trustPeers:'metadataTrust',shareLastfm:'metadataShareLastfm'};
+async function loadMetadataSettings(){try{const r=await fetch('/api/admin/telemetry/metadata',{cache:'no-store'}),d=await r.json();if(!r.ok)throw Error(d.error||'Could not load metadata settings');$('#metadataPreferred').value=d.preferred;$('#metadataContact').value=d.contact||'';$('#metadataMinutes').value=String(d.minutes||5);for(const [k,id] of Object.entries(metadataFields))$('#'+id).checked=!!d[k];$('#metadataCredentialState').textContent=(d.apiKeyConfigured?'API key saved. ':'No API key saved. ')+(d.secretConfigured?'Shared secret saved. ':'')+(d.encryptionReady?'Encrypted storage ready.':'Configure METADATA_SETTINGS_KEY before saving credentials.');$('#metadataStats').textContent=`${d.verified||0} verified fields`+(d.lastRun?` · Last batch: ${new Date(d.lastRun.at).toLocaleString()} · ${d.lastRun.verified} updated · ${d.lastRun.imported} imported`:'')+(d.lastError?' · '+d.lastError:'');}catch(e){$('#metadataStatus').textContent=e.message;}}
+$('#metadataKey').addEventListener('input',()=>{if($('#metadataKey').value)$('#metadataLastfm').checked=true;});
+$('#metadataForm').addEventListener('submit',async e=>{e.preventDefault();const b={preferred:$('#metadataPreferred').value,contact:$('#metadataContact').value,minutes:Number($('#metadataMinutes').value),apiKey:$('#metadataKey').value,secret:$('#metadataSecret').value};for(const [k,id] of Object.entries(metadataFields))b[k]=$('#'+id).checked;try{const r=await post('/api/admin/telemetry/metadata',b,'PUT'),d=await r.json();if(!r.ok)throw Error(d.error||'Save failed');$('#metadataKey').value='';$('#metadataSecret').value='';$('#metadataStatus').textContent='Metadata settings saved.';await loadMetadataSettings();}catch(e){$('#metadataStatus').textContent=e.message;}});
+$('#metadataForm').addEventListener('click',async e=>{const provider=e.target.dataset.metadataTest;if(!provider&&e.target.id!=='metadataRun')return;const btn=e.target;btn.disabled=true;$('#metadataStatus').textContent='Working…';try{const r=await post('/api/admin/telemetry/metadata/'+(provider?'test':'run'),provider?{provider}:{}),d=await r.json();if(!r.ok)throw Error(d.error||'Operation failed');$('#metadataStatus').textContent=provider?'Provider responded successfully.':d.skipped?d.reason:`Batch complete: ${d.verified||0} verified, ${d.imported||0} imported, ${d.errors||0} errors.`;await loadMetadataSettings();}catch(e){$('#metadataStatus').textContent=e.message;}finally{btn.disabled=false;}});
 $('#netTabCrons').onclick=()=>{location.hash='network/crons';showNetworkTab('crons');};
 function cronJobTemplate(key){
   const id="cron-"+key;
